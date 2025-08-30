@@ -1,31 +1,4 @@
 {
-    "ABCD1234EFGH5678": {
-        "user_id": "123456789012345678",
-        "username": "unknown",
-        "discriminator": "0000",
-        "creation_date": "2023-01-01 00:00:00",
-        "active": false,
-        "discord_id": "unknown",
-        "guild_id": "unknown"
-    },
-    "B1F9WLSLJ0L6L67D": {
-        "user_id": "884613696658243594",
-        "username": "unknown",
-        "discriminator": "0000",
-        "creation_date": "2023-01-01 00:00:00",
-        "active": false,
-        "discord_id": "unknown",
-        "guild_id": "unknown"
-    },
-    "MI9YRD22IL9GOP67": {
-        "user_id": "884613696658243594",
-        "username": "unknown",
-        "discriminator": "0000",
-        "creation_date": "2023-01-01 00:00:00",
-        "active": false,
-        "discord_id": "unknown",
-        "guild_id": "unknown"
-    },
     "81667F7D5FE475F0": {
         "user_id": "884613696658243594",
         "username": "raphaelcsc911",
@@ -53,4 +26,5 @@
         "discord_id": "663927631153987594",
         "guild_id": "1084293448099708968"
     }
+
 }
