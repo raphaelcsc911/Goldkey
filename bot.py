@@ -245,6 +245,44 @@ async def key_status(ctx):
     
     await ctx.send(embed=embed)
 
+# ADDED: Handle member leave events
+@bot.event
+async def on_member_remove(member):
+    """Automatically deactivate keys when a member leaves the server"""
+    try:
+        user_id = str(member.id)
+        keys = load_keys()
+        deactivated = 0
+        
+        log_message(f"Member left: {member.name} (ID: {user_id})")
+        
+        for key, info in keys.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get('user_id') == user_id and info.get('active', False):
+                info['active'] = False
+                info['deactivation_date'] = str(datetime.now())
+                info['deactivation_reason'] = "User left the server"
+                deactivated += 1
+                log_message(f"Deactivated key: {key} for user {member.name}")
+        
+        if deactivated > 0:
+            save_keys(keys)
+            log_message(f"Deactivated {deactivated} keys for user {member.name} (ID: {user_id}) who left the server")
+            
+            # Log to a specific channel if desired
+            try:
+                channel = bot.get_channel(CHANNEL_ID)  # Use your log channel ID
+                if channel:
+                    await channel.send(f"🔑 Deactivated {deactivated} keys for {member.mention} who left the server")
+            except Exception as e:
+                log_message(f"Could not send message to log channel: {e}")
+        else:
+            log_message(f"User {member.name} (ID: {user_id}) left but had no active keys")
+            
+    except Exception as e:
+        log_message(f"Error handling member leave: {e}")
+
 class KeyButtons(View):
     def __init__(self):
         super().__init__(timeout=None)
