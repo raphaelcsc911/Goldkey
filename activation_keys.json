@@ -7,24 +7,7 @@
         "active": true,
         "discord_id": "884613696658243594",
         "guild_id": "1084293448099708968"
-    },
-    "29FD26FAD52C587E": {
-        "user_id": "1225122622166143129",
-        "username": "piry0712",
-        "discriminator": "0",
-        "creation_date": "2025-08-30 14:02:21.281592",
-        "active": true,
-        "discord_id": "1225122622166143129",
-        "guild_id": "1084293448099708968"
-    },
-    "2E3FFE566ADE27C6": {
-        "user_id": "663927631153987594",
-        "username": "claudio10__",
-        "discriminator": "0",
-        "creation_date": "2025-08-30 14:10:44.241165",
-        "active": true,
-        "discord_id": "663927631153987594",
-        "guild_id": "1084293448099708968"
     }
 
 }
+
