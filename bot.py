@@ -1,4 +1,3 @@
-
 import os
 import discord
 import asyncio
@@ -571,3 +570,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
 ```
+
