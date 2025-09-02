@@ -1,9 +1,11 @@
+
 import os
 import discord
-from discord.ext import commands, tasks
-from discord.ui import Button, View
+import asyncio
 import json
 import hashlib
+from discord.ext import commands, tasks
+from discord.ui import Button, View
 from datetime import datetime
 from flask import Flask, request, jsonify
 from threading import Thread
@@ -116,10 +118,6 @@ def verify_key():
 
 def run():
     app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    server = Thread(target=run)
-    server.start()
 
 # Set up intents
 intents = discord.Intents.default()
@@ -562,6 +560,14 @@ async def on_ready():
         print("3. The bot has the necessary permissions (Send Messages, View Channel, etc.)")
 
 
-# Start the bot
-keep_alive()
-bot.run(BOT_TOKEN)
+# Start the bot and Flask server
+if __name__ == "__main__":
+    # Start Flask in a thread for web server
+    Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False)).start()
+    
+    # Start the Discord bot
+    try:
+        bot.run(BOT_TOKEN)
+    except Exception as e:
+        print(f"❌ Failed to start bot: {e}")
+```
