@@ -115,9 +115,6 @@ def verify_key():
         log_message(f"Error verifying key: {e}")
         return jsonify({"valid": False})
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
 # Set up intents
 intents = discord.Intents.default()
 intents.messages = True
@@ -558,13 +555,17 @@ async def on_ready():
         print("2. The CHANNEL_ID is correct")
         print("3. The bot has the necessary permissions (Send Messages, View Channel, etc.)")
 
+def run_flask():
+    """Run Flask in a separate thread"""
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
 
-# Start the bot and Flask server
+# Start the Flask server in a separate thread
+flask_thread = Thread(target=run_flask)
+flask_thread.daemon = True  # This makes the thread exit when the main thread exits
+flask_thread.start()
+
+# Start the Discord bot
 if __name__ == "__main__":
-    # Start Flask in a thread for web server
-    Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False)).start()
-    
-    # Start the Discord bot
     try:
         bot.run(BOT_TOKEN)
     except Exception as e:
