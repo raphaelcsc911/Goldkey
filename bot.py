@@ -569,5 +569,3 @@ if __name__ == "__main__":
         bot.run(BOT_TOKEN)
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
-```
-
