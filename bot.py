@@ -115,6 +115,9 @@ def verify_key():
         log_message(f"Error verifying key: {e}")
         return jsonify({"valid": False})
 
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
 # Set up intents
 intents = discord.Intents.default()
 intents.messages = True
@@ -280,7 +283,7 @@ async def revoke_key(ctx, user: discord.Member):
 async def key_status(ctx):
     keys = load_keys()
     active = 0
-    inactive = 0
+    incomplete = 0
     
     for key, info in keys.items():
         if not isinstance(info, dict):
@@ -288,11 +291,11 @@ async def key_status(ctx):
         if info.get('active', False):
             active += 1
         else:
-            inactive += 1
+            incomplete += 1
     
     embed = discord.Embed(title="🔑 Key Status", color=0x00ff00)
     embed.add_field(name="Active Keys", value=str(active), inline=True)
-    embed.add_field(name="Inactive Keys", value=str(inactive), inline=True)
+    embed.add_field(name="Incomplete Keys", value=str(incomplete), inline=True)
     embed.add_field(name="Total Keys", value=str(len(keys)), inline=True)
     
     await ctx.send(embed=embed)
@@ -555,17 +558,12 @@ async def on_ready():
         print("2. The CHANNEL_ID is correct")
         print("3. The bot has the necessary permissions (Send Messages, View Channel, etc.)")
 
-def run_flask():
-    """Run Flask in a separate thread"""
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
-
-# Start the Flask server in a separate thread
-flask_thread = Thread(target=run_flask)
-flask_thread.daemon = True  # This makes the thread exit when the main thread exits
-flask_thread.start()
-
-# Start the Discord bot
+# Start the bot and Flask server
 if __name__ == "__main__":
+    # Start Flask in a thread for web server
+    Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False)).start()
+    
+    # Start the Discord bot
     try:
         bot.run(BOT_TOKEN)
     except Exception as e:
