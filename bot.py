@@ -24,8 +24,12 @@ if not BOT_TOKEN:
 
 ROLE_ID = int(os.getenv('ROLE_ID', 1281782820074688542))
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', 1411206861499400192))
-LOG_CHANNEL_ID = 1411710161868820671  # Your new logging channel ID
+LOG_CHANNEL_ID = 1411710161868820671
 KEYS_FILE = "activation_keys.json"
+
+# Get port from Render environment variable or use default
+PORT = int(os.environ.get('PORT', 8080))
+print(f"Using port: {PORT}")
 
 # Flask app for keeping the bot alive and handling verification
 app = Flask('')
@@ -114,9 +118,6 @@ def verify_key():
     except Exception as e:
         log_message(f"Error verifying key: {e}")
         return jsonify({"valid": False})
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
 
 # Set up intents
 intents = discord.Intents.default()
@@ -212,7 +213,7 @@ async def check_subscriber_roles():
                         try:
                             log_channel = bot.get_channel(LOG_CHANNEL_ID)
                             if log_channel:
-                                embed = discord.Embed(
+                                embed = discord.Emembed(
                                     title="🔑 Key Deactivated",
                                     description=f"User lost subscriber role",
                                     color=0xff0000,
@@ -283,7 +284,7 @@ async def revoke_key(ctx, user: discord.Member):
 async def key_status(ctx):
     keys = load_keys()
     active = 0
-    incomplete = 0
+    inactive = 0
     
     for key, info in keys.items():
         if not isinstance(info, dict):
@@ -291,11 +292,11 @@ async def key_status(ctx):
         if info.get('active', False):
             active += 1
         else:
-            incomplete += 1
+            inactive += 1
     
     embed = discord.Embed(title="🔑 Key Status", color=0x00ff00)
     embed.add_field(name="Active Keys", value=str(active), inline=True)
-    embed.add_field(name="Incomplete Keys", value=str(incomplete), inline=True)
+    embed.add_field(name="Inactive Keys", value=str(inactive), inline=True)
     embed.add_field(name="Total Keys", value=str(len(keys)), inline=True)
     
     await ctx.send(embed=embed)
@@ -558,13 +559,19 @@ async def on_ready():
         print("2. The CHANNEL_ID is correct")
         print("3. The bot has the necessary permissions (Send Messages, View Channel, etc.)")
 
-# Start the bot and Flask server
-if __name__ == "__main__":
-    # Start Flask in a thread for web server
-    Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False)).start()
-    
-    # Start the Discord bot
-    try:
-        bot.run(BOT_TOKEN)
-    except Exception as e:
-        print(f"❌ Failed to start bot: {e}")
+def run_flask():
+    """Run Flask with the correct port for Render"""
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
+# Start Flask in a separate thread
+flask_thread = Thread(target=run_flask)
+flask_thread.daemon = True
+flask_thread.start()
+
+print(f"Flask server starting on port {PORT}")
+
+# Start the Discord bot
+try:
+    bot.run(BOT_TOKEN)
+except Exception as e:
+    print(f"❌ Failed to start bot: {e}")
