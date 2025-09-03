@@ -1,7 +1,13 @@
 services:
-  - type: worker
+  - type: web
     name: discord-bot
     env: python
-    plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot.py"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn bot:app
+    envVars:
+      - key: BOT_TOKEN
+        fromSecret: true
+      - key: ROLE_ID
+        fromSecret: true
+      - key: CHANNEL_ID
+        fromSecret: true
