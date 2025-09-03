@@ -3,12 +3,14 @@ import discord
 import asyncio
 import json
 import hashlib
+import time
 from discord.ext import commands, tasks
 from discord.ui import Button, View
 from datetime import datetime
 from flask import Flask, request, jsonify
 from threading import Thread
 from dotenv import load_dotenv
+from collections import defaultdict
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +32,25 @@ KEYS_FILE = "activation_keys.json"
 # Get port from Render environment variable or use default
 PORT = int(os.environ.get('PORT', 8080))
 print(f"Using port: {PORT}")
+
+# Rate limiting for button interactions
+class RateLimiter:
+    def __init__(self, rate, per):
+        self.rate = rate
+        self.per = per
+        self.allowances = defaultdict(list)
+    
+    def is_limited(self, user_id):
+        now = time.time()
+        self.allowances[user_id] = [t for t in self.allowances[user_id] if now - t < self.per]
+        
+        if len(self.allowances[user_id]) < self.rate:
+            self.allowances[user_id].append(now)
+            return False
+        return True
+
+# Create rate limiters
+button_limiter = RateLimiter(3, 60)  # 3 clicks per minute per user
 
 # Flask app for keeping the bot alive and handling verification
 app = Flask('')
@@ -184,7 +205,7 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
-@tasks.loop(seconds=3600)  # Runs every hour
+@tasks.loop(seconds=21600)  # Runs every 6 hours (reduced from 1 hour)
 async def check_subscriber_roles():
     print("🔍 Checking subscriber roles...")
     keys = load_keys()
@@ -213,7 +234,7 @@ async def check_subscriber_roles():
                         try:
                             log_channel = bot.get_channel(LOG_CHANNEL_ID)
                             if log_channel:
-                                embed = discord.Emembed(
+                                embed = discord.Embed(
                                     title="🔑 Key Deactivated",
                                     description=f"User lost subscriber role",
                                     color=0xff0000,
@@ -240,6 +261,7 @@ async def check_subscriber_roles():
 # Admin command to revoke a user's key
 @bot.command()
 @commands.has_permissions(administrator=True)
+@commands.cooldown(1, 10, commands.BucketType.user)  # 1 command every 10 seconds per user
 async def revoke_key(ctx, user: discord.Member):
     keys = load_keys()
     revoked = 0
@@ -281,6 +303,7 @@ async def revoke_key(ctx, user: discord.Member):
 # Admin command to view key status
 @bot.command()
 @commands.has_permissions(administrator=True)
+@commands.cooldown(1, 5, commands.BucketType.user)  # 1 command every 5 seconds per user
 async def key_status(ctx):
     keys = load_keys()
     active = 0
@@ -348,12 +371,28 @@ async def on_member_remove(member):
     except Exception as e:
         log_message(f"Error handling member leave: {e}")
 
+# Handle rate limit errors
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"❌ This command is on cooldown. Try again in {error.retry_after:.2f}s.")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command.")
+    else:
+        # You might want to log other errors
+        pass
+
 class KeyButtons(View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="🔄 Get My Key", style=discord.ButtonStyle.primary, custom_id="get_key")
     async def get_key(self, interaction: discord.Interaction, button: Button):
+        # Rate limiting
+        if button_limiter.is_limited(interaction.user.id):
+            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
+            return
+            
         if not await has_subscriber_role(interaction.user.id, interaction.guild):
             await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
             return
@@ -416,6 +455,11 @@ class KeyButtons(View):
 
     @discord.ui.button(label="👀 View My Key", style=discord.ButtonStyle.secondary, custom_id="view_key")
     async def view_key(self, interaction: discord.Interaction, button: Button):
+        # Rate limiting
+        if button_limiter.is_limited(interaction.user.id):
+            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
+            return
+            
         keys = load_keys()
         user_id = str(interaction.user.id)
         
@@ -439,6 +483,11 @@ class KeyButtons(View):
 
     @discord.ui.button(label="🆕 Renew My Key", style=discord.ButtonStyle.success, custom_id="renew_key")
     async def renew_key(self, interaction: discord.Interaction, button: Button):
+        # Rate limiting
+        if button_limiter.is_limited(interaction.user.id):
+            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
+            return
+            
         if not await has_subscriber_role(interaction.user.id, interaction.guild):
             await interaction.response.send_message("❌ You need the 'subscriber' role to renew your key!", ephemeral=True)
             return
