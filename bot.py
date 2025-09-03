@@ -487,7 +487,3 @@ if __name__ == "__main__":
         bot.run(BOT_TOKEN)
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
-
-# This creates a WSGI application for Gunicorn
-# Render will use this when deployed
-app.wsgi_app = lambda environ, start_response: app.wsgi_app(environ, start_response)
