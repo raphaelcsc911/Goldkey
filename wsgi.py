@@ -8,6 +8,7 @@ def run_bot():
         # Create a new event loop for the thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        bot.loop = loop
         loop.run_until_complete(bot.start(bot.token))
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
