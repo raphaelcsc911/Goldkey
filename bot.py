@@ -6,7 +6,7 @@ import hashlib
 import time
 from discord.ext import commands, tasks
 from discord.ui import Button, View
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from threading import Thread
 from dotenv import load_dotenv
@@ -49,10 +49,11 @@ class RateLimiter:
             return False
         return True
 
-# Create rate limiters
-button_limiter = RateLimiter(3, 60)  # 3 clicks per minute per user
+# Create rate limiters with your requested settings
+get_key_limiter = RateLimiter(1, 21600)  # 1 click per 6 hours (21600 seconds)
+view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
 
-# Flask app for keeping the bot alive and handling verification
+# Flask app for keeping the bot alive
 app = Flask(__name__)
 
 @app.route('/')
@@ -68,58 +69,6 @@ def log_message(message):
             f.write(f"[{timestamp}] {message}\n")
     except:
         print(f"[{timestamp}] {message}")
-
-@app.route('/verify_key', methods=['POST'])
-def verify_key():
-    try:
-        data = request.get_json()
-        if not data or 'key' not in data:
-            log_message("No key provided in request")
-            return jsonify({"valid": False})
-        
-        key = data['key'].strip().upper()
-        keys = load_keys()
-        
-        log_message(f"Verifying key: {key}")
-        
-        # Check if key exists and is active
-        if key in keys and isinstance(keys[key], dict) and keys[key].get('active', False):
-            log_message(f"Key found and active: {key}")
-            
-            # Additional check: verify user still has subscriber role
-            user_id = keys[key].get('user_id')
-            guild_id = keys[key].get('guild_id')
-            
-            if guild_id and user_id:
-                # Try to check if user still has the role
-                try:
-                    guild = bot.get_guild(int(guild_id))
-                    if guild:
-                        member = guild.get_member(int(user_id))
-                        if member:
-                            has_role = any(role.id == ROLE_ID for role in member.roles)
-                            if not has_role:
-                                # User lost role, deactivate key
-                                keys[key]['active'] = False
-                                keys[key]['deactivation_date'] = str(datetime.now())
-                                keys[key]['deactivation_reason'] = "Lost subscriber role (verified)"
-                                save_keys(keys)
-                                log_message(f"Key deactivated due to lost role: {key}")
-                                return jsonify({"valid": False})
-                except Exception as e:
-                    log_message(f"Error checking role: {e}")
-                    # If we can't check the role, assume it's still valid
-                    pass
-            
-            log_message(f"Key validation successful: {key}")
-            return jsonify({"valid": True})
-        else:
-            log_message(f"Key not found or inactive: {key}")
-            return jsonify({"valid": False})
-            
-    except Exception as e:
-        log_message(f"Error verifying key: {e}")
-        return jsonify({"valid": False})
 
 # Set up intents
 intents = discord.Intents.default()
@@ -186,7 +135,7 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
-@tasks.loop(seconds=21600)  # Runs every 6 hours
+@tasks.loop(seconds=14400)  # Runs every 4 hours (changed from 6 hours)
 async def check_subscriber_roles():
     """Check if users still have the subscriber role and deactivate keys if not"""
     print("🔍 Checking subscriber roles...")
@@ -298,48 +247,6 @@ async def on_member_remove(member):
     except Exception as e:
         log_message(f"Error handling member leave: {e}")
 
-# Admin command to revoke a user's key
-@bot.command()
-@commands.has_permissions(administrator=True)
-@commands.cooldown(1, 10, commands.BucketType.user)
-async def revoke_key(ctx, user: discord.Member):
-    keys = load_keys()
-    revoked = 0
-    
-    for key, info in keys.items():
-        if not isinstance(info, dict):
-            continue
-        if info.get('user_id') == str(user.id) and info.get('active', False):
-            info['active'] = False
-            info['revocation_date'] = str(datetime.now())
-            info['revocation_reason'] = "Manually revoked by admin"
-            revoked += 1
-    
-    if revoked > 0:
-        save_keys(keys)
-        
-        # Send log to logging channel
-        try:
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                embed = discord.Embed(
-                    title="🔑 Key Revoked",
-                    description="Admin manually revoked keys",
-                    color=0xff0000,
-                    timestamp=datetime.now()
-                )
-                embed.add_field(name="Admin", value=ctx.author.mention, inline=True)
-                embed.add_field(name="User", value=user.mention, inline=True)
-                embed.add_field(name="Keys Revoked", value=str(revoked), inline=True)
-                embed.add_field(name="Reason", value="Manual revocation by admin", inline=False)
-                await log_channel.send(embed=embed)
-        except Exception as e:
-            log_message(f"Could not send log to channel: {e}")
-            
-        await ctx.send(f"✅ Revoked {revoked} keys from {user.mention}")
-    else:
-        await ctx.send(f"❌ {user.mention} doesn't have any active keys.")
-
 # Admin command to view key status
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -381,9 +288,13 @@ class KeyButtons(View):
 
     @discord.ui.button(label="🔄 Get My Key", style=discord.ButtonStyle.primary, custom_id="get_key")
     async def get_key(self, interaction: discord.Interaction, button: Button):
-        # Rate limiting
-        if button_limiter.is_limited(interaction.user.id):
-            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
+        # Rate limiting (1 click per 6 hours)
+        if get_key_limiter.is_limited(interaction.user.id):
+            cooldown_time = "6 hours"
+            await interaction.response.send_message(
+                f"❌ You can only request a new key once every {cooldown_time}. Please wait before requesting another key.", 
+                ephemeral=True
+            )
             return
             
         if not await has_subscriber_role(interaction.user.id, interaction.guild):
@@ -448,9 +359,13 @@ class KeyButtons(View):
 
     @discord.ui.button(label="👀 View My Key", style=discord.ButtonStyle.secondary, custom_id="view_key")
     async def view_key(self, interaction: discord.Interaction, button: Button):
-        # Rate limiting
-        if button_limiter.is_limited(interaction.user.id):
-            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
+        # Rate limiting (2 clicks per hour)
+        if view_key_limiter.is_limited(interaction.user.id):
+            cooldown_time = "hour"
+            await interaction.response.send_message(
+                f"❌ You can only view your key twice per {cooldown_time}. Please wait before trying again.", 
+                ephemeral=True
+            )
             return
             
         keys = load_keys()
@@ -504,8 +419,8 @@ async def on_ready():
                 content=(
                     "🔑 **Activation Key Manager**\n\n"
                     "Click below to manage your key:\n"
-                    "• **🔄 Get My Key**: Generate a new key\n"
-                    "• **👀 View My Key**: Show your current key\n\n"
+                    "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
+                    "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
                     "*Your key will be shown directly in this message*"
                 ),
                 view=view
@@ -516,8 +431,8 @@ async def on_ready():
             await channel.send(
                 "🔑 **Activation Key Manager**\n\n"
                 "Click below to manage your key:\n"
-                "• **🔄 Get My Key**: Generate a new key\n"
-                "• **👀 View My Key**: Show your current key\n\n"
+                "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
+                "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
                 "*Your key will be shown directly in this message*",
                 view=view
             )
