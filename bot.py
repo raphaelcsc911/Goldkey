@@ -8,7 +8,8 @@ from discord.ext import commands, tasks
 from discord.ui import Button, View
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-from threading import Thread
+from flask_cors import CORS
+from threading import Thread, Lock
 from dotenv import load_dotenv
 from collections import defaultdict
 
@@ -33,6 +34,9 @@ KEYS_FILE = "activation_keys.json"
 PORT = int(os.environ.get('PORT', 10000))
 print(f"Using port: {PORT}")
 
+# Create a lock for thread-safe file operations
+file_lock = Lock()
+
 # Rate limiting for button interactions
 class RateLimiter:
     def __init__(self, rate, per):
@@ -55,6 +59,7 @@ view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
 
 # Flask app for keeping the bot alive and handling verification
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/')
 def home():
@@ -70,30 +75,45 @@ def log_message(message):
     except:
         print(f"[{timestamp}] {message}")
 
-@app.route('/verify_key', methods=['POST'])
+@app.route('/verify_key', methods=['POST', 'OPTIONS'])
 def verify_key():
     try:
+        # Handle preflight request
+        if request.method == 'OPTIONS':
+            response = jsonify({"status": "ok"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+            response.headers.add('Access-Control-Allow-Methods', 'POST')
+            return response
+            
         data = request.get_json()
         if not data or 'key' not in data:
             log_message("No key provided in request")
-            return jsonify({"valid": False})
+            return jsonify({"valid": False, "error": "No key provided"})
         
         key = data['key'].strip().upper()
         keys = load_keys()
         
         log_message(f"Verifying key: {key}")
+        log_message(f"Available keys: {list(keys.keys())}")
         
         # Check if key exists and is active
         if key in keys and isinstance(keys[key], dict) and keys[key].get('active', False):
             log_message(f"Key found and active: {key}")
-            return jsonify({"valid": True})
+            response = jsonify({"valid": True})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response
         else:
             log_message(f"Key not found or inactive: {key}")
-            return jsonify({"valid": False})
+            response = jsonify({"valid": False, "error": "Invalid or inactive key"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response
             
     except Exception as e:
         log_message(f"Error verifying key: {e}")
-        return jsonify({"valid": False})
+        response = jsonify({"valid": False, "error": str(e)})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
 
 # Set up intents
 intents = discord.Intents.default()
@@ -106,40 +126,45 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 def safe_load_keys():
     """Safely load keys with error handling"""
-    try:
-        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-        # Ensure all values are dictionaries
-        cleaned_data = {}
-        for key, value in data.items():
-            if isinstance(value, dict):
-                cleaned_data[key] = value
-            else:
-                # Convert invalid entries to valid ones
-                cleaned_data[key] = {
-                    'user_id': str(value) if isinstance(value, int) else "unknown",
-                    'username': "unknown",
-                    'discriminator': "0000",
-                    'creation_date': str(datetime.now()),
-                    'active': False,
-                    'discord_id': "unknown",
-                    'guild_id': "unknown"
-                }
+    with file_lock:
+        try:
+            if not os.path.exists(KEYS_FILE):
+                return {}
                 
-        return cleaned_data
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+            with open(KEYS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            # Ensure all values are dictionaries
+            cleaned_data = {}
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    cleaned_data[key] = value
+                else:
+                    # Convert invalid entries to valid ones
+                    cleaned_data[key] = {
+                        'user_id': str(value) if isinstance(value, int) else "unknown",
+                        'username': "unknown",
+                        'discriminator': "0000",
+                        'creation_date': str(datetime.now()),
+                        'active': False,
+                        'discord_id': "unknown",
+                        'guild_id': "unknown"
+                    }
+                    
+            return cleaned_data
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
 def safe_save_keys(keys):
     """Safely save keys with error handling"""
-    try:
-        with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(keys, f, indent=4, ensure_ascii=False)
-        return True
-    except Exception as e:
-        print(f"Error saving keys: {e}")
-        return False
+    with file_lock:
+        try:
+            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(keys, f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"Error saving keys: {e}")
+            return False
 
 def load_keys():
     return safe_load_keys()
