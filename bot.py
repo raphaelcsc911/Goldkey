@@ -30,7 +30,7 @@ LOG_CHANNEL_ID = 1411710161868820671
 KEYS_FILE = "activation_keys.json"
 
 # Get port from Render environment variable or use default
-PORT = int(os.environ.get('PORT', 8080))
+PORT = int(os.environ.get('PORT', 10000))
 print(f"Using port: {PORT}")
 
 # Rate limiting for button interactions
@@ -53,7 +53,7 @@ class RateLimiter:
 button_limiter = RateLimiter(3, 60)  # 3 clicks per minute per user
 
 # Flask app for keeping the bot alive and handling verification
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
@@ -81,11 +81,11 @@ def verify_key():
         keys = load_keys()
         
         log_message(f"Verifying key: {key}")
-        log_message(f"Keys in database: {list(keys.keys())}")
         
         # Check if key exists and is active
         if key in keys and isinstance(keys[key], dict) and keys[key].get('active', False):
             log_message(f"Key found and active: {key}")
+            
             # Additional check: verify user still has subscriber role
             user_id = keys[key].get('user_id')
             guild_id = keys[key].get('guild_id')
@@ -105,25 +105,6 @@ def verify_key():
                                 keys[key]['deactivation_reason'] = "Lost subscriber role (verified)"
                                 save_keys(keys)
                                 log_message(f"Key deactivated due to lost role: {key}")
-                                
-                                # Send log to logging channel
-                                try:
-                                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                                    if log_channel:
-                                        embed = discord.Embed(
-                                            title="🔑 Key Deactivated",
-                                            description=f"User lost subscriber role",
-                                            color=0xff0000,
-                                            timestamp=datetime.now()
-                                        )
-                                        embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
-                                        embed.add_field(name="Key", value=f"`{key}`", inline=True)
-                                        embed.add_field(name="Reason", value="Lost subscriber role", inline=False)
-                                        embed.set_footer(text="Automatic deactivation")
-                                        asyncio.run_coroutine_threadsafe(log_channel.send(embed=embed), bot.loop)
-                                except Exception as e:
-                                    log_message(f"Could not send log to channel: {e}")
-                                
                                 return jsonify({"valid": False})
                 except Exception as e:
                     log_message(f"Error checking role: {e}")
@@ -205,63 +186,122 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
-@tasks.loop(seconds=21600)  # Runs every 6 hours (reduced from 1 hour)
+@tasks.loop(seconds=21600)  # Runs every 6 hours
 async def check_subscriber_roles():
+    """Check if users still have the subscriber role and deactivate keys if not"""
     print("🔍 Checking subscriber roles...")
     keys = load_keys()
+    deactivated_count = 0
+    
     for key, info in list(keys.items()):
-        # Skip if info is not a dictionary
         if not isinstance(info, dict):
             continue
             
-        # Skip if the required fields are missing
         if 'active' not in info or 'user_id' not in info:
             continue
             
         if info['active']:
             try:
                 user_id = int(info['user_id'])
-                for guild in bot.guilds:
-                    has_role = await has_subscriber_role(user_id, guild)
-                    if not has_role:
-                        # Deactivate the key
-                        keys[key]['active'] = False
-                        keys[key]['deactivation_date'] = str(datetime.now())
-                        keys[key]['deactivation_reason'] = "Lost subscriber role"
-                        print(f"❌ Deactivated key for {info.get('username', 'unknown user')}")
-                        
-                        # Send log to logging channel
-                        try:
-                            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                            if log_channel:
-                                embed = discord.Embed(
-                                    title="🔑 Key Deactivated",
-                                    description=f"User lost subscriber role",
-                                    color=0xff0000,
-                                    timestamp=datetime.now()
-                                )
-                                embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
-                                embed.add_field(name="Key", value=f"`{key}`", inline=True)
-                                embed.add_field(name="Reason", value="Lost subscriber role", inline=False)
-                                embed.set_footer(text="Automatic deactivation")
-                                await log_channel.send(embed=embed)
-                        except Exception as e:
-                            log_message(f"Could not send log to channel: {e}")
-                        
-                        break
-            except (ValueError, TypeError):
+                guild_id = info.get('guild_id')
+                
+                if not guild_id:
+                    continue
+                    
+                guild = bot.get_guild(int(guild_id))
+                if not guild:
+                    continue
+                    
+                has_role = await has_subscriber_role(user_id, guild)
+                if not has_role:
+                    # Deactivate the key
+                    keys[key]['active'] = False
+                    keys[key]['deactivation_date'] = str(datetime.now())
+                    keys[key]['deactivation_reason'] = "Lost subscriber role"
+                    deactivated_count += 1
+                    print(f"❌ Deactivated key for user {info.get('username', 'unknown')}")
+                    
+                    # Send log to logging channel
+                    try:
+                        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                        if log_channel:
+                            embed = discord.Embed(
+                                title="🔑 Key Deactivated",
+                                description="User lost subscriber role",
+                                color=0xff0000,
+                                timestamp=datetime.now()
+                            )
+                            embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
+                            embed.add_field(name="Key", value=f"`{key}`", inline=True)
+                            embed.add_field(name="Reason", value="Lost subscriber role", inline=False)
+                            embed.set_footer(text="Automatic deactivation")
+                            await log_channel.send(embed=embed)
+                    except Exception as e:
+                        log_message(f"Could not send log to channel: {e}")
+            except (ValueError, TypeError) as e:
                 # Invalid user_id format
                 keys[key]['active'] = False
                 keys[key]['deactivation_date'] = str(datetime.now())
-                keys[key]['deactivation_reason'] = "Invalid user ID format"
+                keys[key]['deactivation_reason'] = f"Invalid user ID format: {e}"
                 print(f"❌ Deactivated key due to invalid user ID: {key}")
     
-    save_keys(keys)
+    if deactivated_count > 0:
+        save_keys(keys)
+        print(f"✅ Deactivated {deactivated_count} keys due to lost subscriber roles")
+    else:
+        print("✅ All keys are valid")
+
+@bot.event
+async def on_member_remove(member):
+    """Automatically deactivate keys when a member leaves the server"""
+    try:
+        user_id = str(member.id)
+        keys = load_keys()
+        deactivated_count = 0
+        
+        log_message(f"Member left: {member.name} (ID: {user_id})")
+        
+        for key, info in keys.items():
+            if not isinstance(info, dict):
+                continue
+                
+            if info.get('user_id') == user_id and info.get('active', False):
+                info['active'] = False
+                info['deactivation_date'] = str(datetime.now())
+                info['deactivation_reason'] = "User left the server"
+                deactivated_count += 1
+                log_message(f"Deactivated key: {key} for user {member.name}")
+        
+        if deactivated_count > 0:
+            save_keys(keys)
+            log_message(f"Deactivated {deactivated_count} keys for user {member.name} (ID: {user_id}) who left the server")
+            
+            # Send log to logging channel
+            try:
+                log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                if log_channel:
+                    embed = discord.Embed(
+                        title="🔑 Key Deactivated",
+                        description="User left the server",
+                        color=0xff0000,
+                        timestamp=datetime.now()
+                    )
+                    embed.add_field(name="User", value=f"{member.name}#{member.discriminator}", inline=True)
+                    embed.add_field(name="Keys Deactivated", value=str(deactivated_count), inline=True)
+                    embed.add_field(name="Reason", value="User left the server", inline=False)
+                    await log_channel.send(embed=embed)
+            except Exception as e:
+                log_message(f"Could not send log to channel: {e}")
+        else:
+            log_message(f"User {member.name} (ID: {user_id}) left but had no active keys")
+            
+    except Exception as e:
+        log_message(f"Error handling member leave: {e}")
 
 # Admin command to revoke a user's key
 @bot.command()
 @commands.has_permissions(administrator=True)
-@commands.cooldown(1, 10, commands.BucketType.user)  # 1 command every 10 seconds per user
+@commands.cooldown(1, 10, commands.BucketType.user)
 async def revoke_key(ctx, user: discord.Member):
     keys = load_keys()
     revoked = 0
@@ -284,7 +324,7 @@ async def revoke_key(ctx, user: discord.Member):
             if log_channel:
                 embed = discord.Embed(
                     title="🔑 Key Revoked",
-                    description=f"Admin manually revoked keys",
+                    description="Admin manually revoked keys",
                     color=0xff0000,
                     timestamp=datetime.now()
                 )
@@ -303,7 +343,7 @@ async def revoke_key(ctx, user: discord.Member):
 # Admin command to view key status
 @bot.command()
 @commands.has_permissions(administrator=True)
-@commands.cooldown(1, 5, commands.BucketType.user)  # 1 command every 5 seconds per user
+@commands.cooldown(1, 5, commands.BucketType.user)
 async def key_status(ctx):
     keys = load_keys()
     active = 0
@@ -324,53 +364,6 @@ async def key_status(ctx):
     
     await ctx.send(embed=embed)
 
-# Handle member leave events
-@bot.event
-async def on_member_remove(member):
-    """Automatically deactivate keys when a member leaves the server"""
-    try:
-        user_id = str(member.id)
-        keys = load_keys()
-        deactivated = 0
-        
-        log_message(f"Member left: {member.name} (ID: {user_id})")
-        
-        for key, info in keys.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get('user_id') == user_id and info.get('active', False):
-                info['active'] = False
-                info['deactivation_date'] = str(datetime.now())
-                info['deactivation_reason'] = "User left the server"
-                deactivated += 1
-                log_message(f"Deactivated key: {key} for user {member.name}")
-        
-        if deactivated > 0:
-            save_keys(keys)
-            log_message(f"Deactivated {deactivated} keys for user {member.name} (ID: {user_id}) who left the server")
-            
-            # Send log to logging channel
-            try:
-                log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                if log_channel:
-                    embed = discord.Embed(
-                        title="🔑 Key Deactivated",
-                        description=f"User left the server",
-                        color=0xff0000,
-                        timestamp=datetime.now()
-                    )
-                    embed.add_field(name="User", value=f"{member.name}#{member.discriminator}", inline=True)
-                    embed.add_field(name="Keys Deactivated", value=str(deactivated), inline=True)
-                    embed.add_field(name="Reason", value="User left the server", inline=False)
-                    await log_channel.send(embed=embed)
-            except Exception as e:
-                log_message(f"Could not send log to channel: {e}")
-        else:
-            log_message(f"User {member.name} (ID: {user_id}) left but had no active keys")
-            
-    except Exception as e:
-        log_message(f"Error handling member leave: {e}")
-
 # Handle rate limit errors
 @bot.event
 async def on_command_error(ctx, error):
@@ -380,7 +373,7 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ You don't have permission to use this command.")
     else:
         # You might want to log other errors
-        pass
+        log_message(f"Command error: {error}")
 
 class KeyButtons(View):
     def __init__(self):
@@ -433,7 +426,7 @@ class KeyButtons(View):
             if log_channel:
                 embed = discord.Embed(
                     title="🔑 Key Generated",
-                    description=f"New key generated for user",
+                    description="New key generated for user",
                     color=0x00ff00,
                     timestamp=datetime.now()
                 )
@@ -481,76 +474,6 @@ class KeyButtons(View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="🆕 Renew My Key", style=discord.ButtonStyle.success, custom_id="renew_key")
-    async def renew_key(self, interaction: discord.Interaction, button: Button):
-        # Rate limiting
-        if button_limiter.is_limited(interaction.user.id):
-            await interaction.response.send_message("❌ Please wait before requesting another key.", ephemeral=True)
-            return
-            
-        if not await has_subscriber_role(interaction.user.id, interaction.guild):
-            await interaction.response.send_message("❌ You need the 'subscriber' role to renew your key!", ephemeral=True)
-            return
-
-        keys = load_keys()
-        user_id = str(interaction.user.id)
-
-        # Check if they have an active key to revoke
-        old_key = None
-        for key, info in keys.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get('user_id') == user_id and info.get('active', False):
-                old_key = key
-                break
-
-        if old_key:
-            # Revoke the old key
-            keys[old_key]['active'] = False
-            keys[old_key]['revocation_date'] = str(datetime.now())
-            keys[old_key]['revocation_reason'] = "Replaced by new key"
-
-        # Generate a new key
-        new_key = generate_key(user_id)
-        keys[new_key] = {
-            'user_id': user_id,
-            'username': str(interaction.user),
-            'discriminator': interaction.user.discriminator,
-            'creation_date': str(datetime.now()),
-            'active': True,
-            'discord_id': str(interaction.user.id),
-            'guild_id': str(interaction.guild.id)
-        }
-
-        save_keys(keys)
-
-        # Send log to logging channel
-        try:
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                embed = discord.Embed(
-                    title="🔑 Key Renewed",
-                    description=f"User renewed their key",
-                    color=0x00ff00,
-                    timestamp=datetime.now()
-                )
-                embed.add_field(name="User", value=interaction.user.mention, inline=True)
-                embed.add_field(name="Old Key", value=f"`{old_key if old_key else 'None'}`", inline=True)
-                embed.add_field(name="New Key", value=f"`{new_key}`", inline=True)
-                await log_channel.send(embed=embed)
-        except Exception as e:
-            log_message(f"Could not send log to channel: {e}")
-
-        # Send the new key directly in the ephemeral response
-        await interaction.response.send_message(
-            f"🔄 **Your New Activation Key:**\n"
-            f"`{new_key}`\n\n"
-            f"Use this key in the Gold Menu to activate the software.\n"
-            f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"**Note:** Your previous key has been deactivated.",
-            ephemeral=True
-        )
-
 @bot.event
 async def on_ready():
     print(f'✅ Bot {bot.user} is online!')
@@ -569,7 +492,7 @@ async def on_ready():
         # Check if a message from the bot already exists
         existing_message = None
         async for message in channel.history(limit=20):
-            if message.author == bot.user and message.components:  # Has components (buttons)
+            if message.author == bot.user and message.components:
                 existing_message = message
                 break
         
@@ -582,8 +505,7 @@ async def on_ready():
                     "🔑 **Activation Key Manager**\n\n"
                     "Click below to manage your key:\n"
                     "• **🔄 Get My Key**: Generate a new key\n"
-                    "• **👀 View My Key**: Show your current key\n"
-                    "• **🆕 Renew My Key**: Generate a new key (invalidates the previous one)\n\n"
+                    "• **👀 View My Key**: Show your current key\n\n"
                     "*Your key will be shown directly in this message*"
                 ),
                 view=view
@@ -595,8 +517,7 @@ async def on_ready():
                 "🔑 **Activation Key Manager**\n\n"
                 "Click below to manage your key:\n"
                 "• **🔄 Get My Key**: Generate a new key\n"
-                "• **👀 View My Key**: Show your current key\n"
-                "• **🆕 Renew My Key**: Generate a new key (invalidates the previous one)\n\n"
+                "• **👀 View My Key**: Show your current key\n\n"
                 "*Your key will be shown directly in this message*",
                 view=view
             )
@@ -612,15 +533,21 @@ def run_flask():
     """Run Flask with the correct port for Render"""
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-# Start Flask in a separate thread
-flask_thread = Thread(target=run_flask)
-flask_thread.daemon = True
-flask_thread.start()
+# This will run when executed directly (for local testing)
+if __name__ == "__main__":
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    print(f"Flask server starting on port {PORT}")
+    
+    # Start the Discord bot in the main thread
+    try:
+        bot.run(BOT_TOKEN)
+    except Exception as e:
+        print(f"❌ Failed to start bot: {e}")
 
-print(f"Flask server starting on port {PORT}")
-
-# Start the Discord bot
-try:
-    bot.run(BOT_TOKEN)
-except Exception as e:
-    print(f"❌ Failed to start bot: {e}")
+# This creates a WSGI application for Gunicorn
+# Render will use this when deployed
+app.wsgi_app = lambda environ, start_response: app.wsgi_app(environ, start_response)
