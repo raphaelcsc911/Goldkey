@@ -1,7 +1,7 @@
 services:
-  - type: web
+  - type: worker
     name: discord-bot
-    env: node
+    env: python
     plan: free
-    buildCommand: "npm install"
-    startCommand: "node index.js"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
