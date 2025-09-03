@@ -53,7 +53,7 @@ class RateLimiter:
 get_key_limiter = RateLimiter(1, 21600)  # 1 click per 6 hours (21600 seconds)
 view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
 
-# Flask app for keeping the bot alive
+# Flask app for keeping the bot alive and handling verification
 app = Flask(__name__)
 
 @app.route('/')
@@ -69,6 +69,31 @@ def log_message(message):
             f.write(f"[{timestamp}] {message}\n")
     except:
         print(f"[{timestamp}] {message}")
+
+@app.route('/verify_key', methods=['POST'])
+def verify_key():
+    try:
+        data = request.get_json()
+        if not data or 'key' not in data:
+            log_message("No key provided in request")
+            return jsonify({"valid": False})
+        
+        key = data['key'].strip().upper()
+        keys = load_keys()
+        
+        log_message(f"Verifying key: {key}")
+        
+        # Check if key exists and is active
+        if key in keys and isinstance(keys[key], dict) and keys[key].get('active', False):
+            log_message(f"Key found and active: {key}")
+            return jsonify({"valid": True})
+        else:
+            log_message(f"Key not found or inactive: {key}")
+            return jsonify({"valid": False})
+            
+    except Exception as e:
+        log_message(f"Error verifying key: {e}")
+        return jsonify({"valid": False})
 
 # Set up intents
 intents = discord.Intents.default()
