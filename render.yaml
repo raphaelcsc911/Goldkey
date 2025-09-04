@@ -2,12 +2,15 @@ services:
   - type: web
     name: discord-bot
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn wsgi:application
+    startCommand: python wsgi.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.0
       - key: BOT_TOKEN
         fromSecret: true
       - key: ROLE_ID
-        fromSecret: true
+        value: "1281782820074688542"
       - key: CHANNEL_ID
-        fromSecret: true
+        value: "1411206861499400192"
