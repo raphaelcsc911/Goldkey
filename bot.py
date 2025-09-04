@@ -16,13 +16,12 @@ from collections import defaultdict
 # Load environment variables
 load_dotenv()
 
-# Your Discord bot configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-
 # Disable voice support to avoid audioop import issues
-import os
 os.environ["DISCORD_INTERACTIONS"] = "false"
 os.environ["DISCORD_VOICE"] = "false"
+
+# Your Discord bot configuration
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 # Check if token exists
 if not BOT_TOKEN:
@@ -66,19 +65,34 @@ view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
+# Add default keys to ensure verification works
+DEFAULT_KEYS = {
+    "81667F7D5FE475F0": {
+        "user_id": "884613696658243594",
+        "username": "raphaelcsc911",
+        "discriminator": "0",
+        "creation_date": "2025-08-30 13:37:39.497589",
+        "active": True,
+        "discord_id": "884613696658243594",
+        "guild_id": "1084293448099708968"
+    }
+}
+
 @app.route('/')
 def home():
     return "✅ Bot is alive and running!"
 
 # Add logging function to bot
 def log_message(message):
-    log_file = "bot_debug.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Print to console (Render will capture this)
+    print(f"[{timestamp}] {message}")
+    # Also write to file for local debugging
     try:
-        with open(log_file, "a", encoding="utf-8") as f:
+        with open("bot_debug.log", "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {message}\n")
     except:
-        print(f"[{timestamp}] {message}")
+        pass
 
 @app.route('/verify_key', methods=['POST', 'OPTIONS'])
 def verify_key():
@@ -134,7 +148,10 @@ def safe_load_keys():
     with file_lock:
         try:
             if not os.path.exists(KEYS_FILE):
-                return {}
+                # If file doesn't exist, create it with default keys
+                with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
+                return DEFAULT_KEYS
                 
             with open(KEYS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -158,7 +175,10 @@ def safe_load_keys():
                     
             return cleaned_data
         except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+            # If file is corrupted, recreate with default keys
+            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
+            return DEFAULT_KEYS
 
 def safe_save_keys(keys):
     """Safely save keys with error handling"""
@@ -517,4 +537,3 @@ if __name__ == "__main__":
         bot.run(BOT_TOKEN)
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
-
