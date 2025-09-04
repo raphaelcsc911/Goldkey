@@ -19,6 +19,11 @@ load_dotenv()
 # Your Discord bot configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
+# Disable voice support to avoid audioop import issues
+import os
+os.environ["DISCORD_INTERACTIONS"] = "false"
+os.environ["DISCORD_VOICE"] = "false"
+
 # Check if token exists
 if not BOT_TOKEN:
     print("❌ ERROR: BOT_TOKEN not found in environment variables!")
@@ -512,3 +517,4 @@ if __name__ == "__main__":
         bot.run(BOT_TOKEN)
     except Exception as e:
         print(f"❌ Failed to start bot: {e}")
+
