@@ -40,6 +40,8 @@ print(f"Using port: {PORT}")
 
 # Create a lock for thread-safe file operations
 file_lock = Lock()
+# Create a lock for user-specific operations to prevent race conditions
+user_locks = defaultdict(Lock)
 
 # Rate limiting for button interactions
 class RateLimiter:
@@ -151,7 +153,7 @@ def safe_load_keys():
                 # If file doesn't exist, create it with default keys
                 with open(KEYS_FILE, 'w', encoding='utf-8') as f:
                     json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
-                return DEFAULT_KEYS
+                return DEFAULT_KEYS.copy()
                 
             with open(KEYS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -178,7 +180,7 @@ def safe_load_keys():
             # If file is corrupted, recreate with default keys
             with open(KEYS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
-            return DEFAULT_KEYS
+            return DEFAULT_KEYS.copy()
 
 def safe_save_keys(keys):
     """Safely save keys with error handling"""
@@ -188,7 +190,7 @@ def safe_save_keys(keys):
                 json.dump(keys, f, indent=4, ensure_ascii=False)
             return True
         except Exception as e:
-            print(f"Error saving keys: {e}")
+            log_message(f"Error saving keys: {e}")
             return False
 
 def load_keys():
@@ -213,7 +215,7 @@ async def has_subscriber_role(user_id, guild):
 @tasks.loop(seconds=14400)  # Runs every 4 hours (changed from 6 hours)
 async def check_subscriber_roles():
     """Check if users still have the subscriber role and deactivate keys if not"""
-    print("🔍 Checking subscriber roles...")
+    log_message("🔍 Checking subscriber roles...")
     keys = load_keys()
     deactivated_count = 0
     
@@ -243,7 +245,7 @@ async def check_subscriber_roles():
                     keys[key]['deactivation_date'] = str(datetime.now())
                     keys[key]['deactivation_reason'] = "Lost subscriber role"
                     deactivated_count += 1
-                    print(f"❌ Deactivated key for user {info.get('username', 'unknown')}")
+                    log_message(f"❌ Deactivated key for user {info.get('username', 'unknown')}")
                     
                     # Send log to logging channel
                     try:
@@ -267,13 +269,13 @@ async def check_subscriber_roles():
                 keys[key]['active'] = False
                 keys[key]['deactivation_date'] = str(datetime.now())
                 keys[key]['deactivation_reason'] = f"Invalid user ID format: {e}"
-                print(f"❌ Deactivated key due to invalid user ID: {key}")
+                log_message(f"❌ Deactivated key due to invalid user ID: {key}")
     
     if deactivated_count > 0:
         save_keys(keys)
-        print(f"✅ Deactivated {deactivated_count} keys due to lost subscriber roles")
+        log_message(f"✅ Deactivated {deactivated_count} keys due to lost subscriber roles")
     else:
-        print("✅ All keys are valid")
+        log_message("✅ All keys are valid")
 
 @bot.event
 async def on_member_remove(member):
@@ -363,106 +365,121 @@ class KeyButtons(View):
 
     @discord.ui.button(label="🔄 Get My Key", style=discord.ButtonStyle.primary, custom_id="get_key")
     async def get_key(self, interaction: discord.Interaction, button: Button):
-        # Rate limiting (1 click per 6 hours)
-        if get_key_limiter.is_limited(interaction.user.id):
-            cooldown_time = "6 hours"
-            await interaction.response.send_message(
-                f"❌ You can only request a new key once every {cooldown_time}. Please wait before requesting another key.", 
-                ephemeral=True
-            )
-            return
-            
-        if not await has_subscriber_role(interaction.user.id, interaction.guild):
-            await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
-            return
-
-        keys = load_keys()
+        # Use user-specific lock to prevent race conditions
         user_id = str(interaction.user.id)
-
-        # Check for existing active key
-        for key, info in keys.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get('user_id') == user_id and info.get('active', False):
+        with user_locks[user_id]:
+            # Rate limiting (1 click per 6 hours)
+            if get_key_limiter.is_limited(interaction.user.id):
                 await interaction.response.send_message(
-                    f"🔑 You already have an active key: `{key}`\n\n"
-                    f"Use this key in the Gold Menu to activate the software.\n"
-                    f"Creation date: {info.get('creation_date', 'unknown')}",
+                    f"❌ You can only request a new key once every 6 hours. Please wait before requesting another key.", 
                     ephemeral=True
                 )
                 return
+                
+            if not await has_subscriber_role(interaction.user.id, interaction.guild):
+                await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
+                return
 
-        # Generate new key
-        new_key = generate_key(user_id)
-        keys[new_key] = {
-            'user_id': user_id,
-            'username': str(interaction.user),
-            'discriminator': interaction.user.discriminator,
-            'creation_date': str(datetime.now()),
-            'active': True,
-            'discord_id': str(interaction.user.id),
-            'guild_id': str(interaction.guild.id)
-        }
+            keys = load_keys()
+            user_id = str(interaction.user.id)
 
-        save_keys(keys)
-        
-        # Send log to logging channel
-        try:
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                embed = discord.Embed(
-                    title="🔑 Key Generated",
-                    description="New key generated for user",
-                    color=0x00ff00,
-                    timestamp=datetime.now()
+            # Check for existing active key
+            for key, info in keys.items():
+                if not isinstance(info, dict):
+                    continue
+                if info.get('user_id') == user_id and info.get('active', False):
+                    await interaction.response.send_message(
+                        f"🔑 You already have an active key: `{key}`\n\n"
+                        f"Use this key in the Gold Menu to activate the software.\n"
+                        f"Creation date: {info.get('creation_date', 'unknown')}",
+                        ephemeral=True
+                    )
+                    return
+
+            # Generate new key
+            new_key = generate_key(user_id)
+            keys[new_key] = {
+                'user_id': user_id,
+                'username': str(interaction.user),
+                'discriminator': interaction.user.discriminator,
+                'creation_date': str(datetime.now()),
+                'active': True,
+                'discord_id': str(interaction.user.id),
+                'guild_id': str(interaction.guild.id)
+            }
+
+            # Save keys and handle potential errors
+            if not save_keys(keys):
+                await interaction.response.send_message(
+                    "❌ Error saving your key. Please try again or contact support.",
+                    ephemeral=True
                 )
-                embed.add_field(name="User", value=interaction.user.mention, inline=True)
-                embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
-                await log_channel.send(embed=embed)
-        except Exception as e:
-            log_message(f"Could not send log to channel: {e}")
-        
-        # Send the key directly in the ephemeral response
-        await interaction.response.send_message(
-            f"🔑 **Your Activation Key:**\n"
-            f"`{new_key}`\n\n"
-            f"Use this key in the Gold Menu to activate the software.\n"
-            f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"**Important:** Save this key somewhere safe!",
-            ephemeral=True
-        )
+                return
+            
+            # Update rate limiter after successful key generation
+            get_key_limiter.allowances[interaction.user.id].append(time.time())
+            
+            # Send log to logging channel
+            try:
+                log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                if log_channel:
+                    embed = discord.Embed(
+                        title="🔑 Key Generated",
+                        description="New key generated for user",
+                        color=0x00ff00,
+                        timestamp=datetime.now()
+                    )
+                    embed.add_field(name="User", value=interaction.user.mention, inline=True)
+                    embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
+                    await log_channel.send(embed=embed)
+            except Exception as e:
+                log_message(f"Could not send log to channel: {e}")
+            
+            # Send the key directly in the ephemeral response
+            await interaction.response.send_message(
+                f"🔑 **Your Activation Key:**\n"
+                f"`{new_key}`\n\n"
+                f"Use this key in the Gold Menu to activate the software.\n"
+                f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+                f"**Important:** Save this key somewhere safe!",
+                ephemeral=True
+            )
 
     @discord.ui.button(label="👀 View My Key", style=discord.ButtonStyle.secondary, custom_id="view_key")
     async def view_key(self, interaction: discord.Interaction, button: Button):
-        # Rate limiting (2 clicks per hour)
-        if view_key_limiter.is_limited(interaction.user.id):
-            cooldown_time = "hour"
-            await interaction.response.send_message(
-                f"❌ You can only view your key twice per {cooldown_time}. Please wait before trying again.", 
-                ephemeral=True
-            )
-            return
-            
-        keys = load_keys()
+        # Use user-specific lock to prevent race conditions
         user_id = str(interaction.user.id)
-        
-        for key, info in keys.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get('user_id') == user_id and info.get('active', False):
+        with user_locks[user_id]:
+            # Rate limiting (2 clicks per hour)
+            if view_key_limiter.is_limited(interaction.user.id):
                 await interaction.response.send_message(
-                    f"🔑 **Your Activation Key:**\n"
-                    f"`{key}`\n\n"
-                    f"Creation date: {info.get('creation_date', 'unknown')}\n\n"
-                    f"Use this key in the Gold Menu to activate the software.",
+                    f"❌ You can only view your key twice per hour. Please wait before trying again.", 
                     ephemeral=True
                 )
                 return
-        
-        await interaction.response.send_message(
-            "❌ You don't have an active key. Use the 'Get My Key' button to generate one.", 
-            ephemeral=True
-        )
+                
+            keys = load_keys()
+            user_id = str(interaction.user.id)
+            
+            for key, info in keys.items():
+                if not isinstance(info, dict):
+                    continue
+                if info.get('user_id') == user_id and info.get('active', False):
+                    # Update rate limiter after successful view
+                    view_key_limiter.allowances[interaction.user.id].append(time.time())
+                    await interaction.response.send_message(
+                        f"🔑 **Your Activation Key:**\n"
+                        f"`{key}`\n\n"
+                        f"Creation date: {info.get('creation_date', 'unknown')}\n\n"
+                        f"Use this key in the Gold Menu to activate the software.",
+                        ephemeral=True
+                    )
+                    return
+            
+            await interaction.response.send_message(
+                "❌ You don't have an active key. Use the 'Get My Key' button to generate one.", 
+                ephemeral=True
+            )
 
 @bot.event
 async def on_ready():
