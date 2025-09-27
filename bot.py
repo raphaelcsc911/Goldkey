@@ -212,6 +212,16 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
+def user_has_active_key(user_id, keys):
+    """Check if a user already has an active key (enhanced check)"""
+    user_id_str = str(user_id)
+    for key, info in keys.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get('user_id') == user_id_str and info.get('active', False):
+            return key, info
+    return None, None
+
 @tasks.loop(seconds=14400)  # Runs every 4 hours (changed from 6 hours)
 async def check_subscriber_roles():
     """Check if users still have the subscriber role and deactivate keys if not"""
@@ -383,18 +393,17 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
 
-            # Check for existing active key
-            for key, info in keys.items():
-                if not isinstance(info, dict):
-                    continue
-                if info.get('user_id') == user_id and info.get('active', False):
-                    await interaction.response.send_message(
-                        f"🔑 You already have an active key: `{key}`\n\n"
-                        f"Use this key in the Gold Menu to activate the software.\n"
-                        f"Creation date: {info.get('creation_date', 'unknown')}",
-                        ephemeral=True
-                    )
-                    return
+            # ENHANCED: Check for existing active key with better logic
+            existing_key, key_info = user_has_active_key(user_id, keys)
+            if existing_key:
+                await interaction.response.send_message(
+                    f"🔑 You already have an active key: `{existing_key}`\n\n"
+                    f"Use this key in the Gold Menu to activate the software.\n"
+                    f"Creation date: {key_info.get('creation_date', 'unknown')}\n\n"
+                    f"**Note:** Each user can only have one active key at a time.",
+                    ephemeral=True
+                )
+                return
 
             # Generate new key
             new_key = generate_key(user_id)
@@ -431,6 +440,7 @@ class KeyButtons(View):
                     )
                     embed.add_field(name="User", value=interaction.user.mention, inline=True)
                     embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
+                    embed.add_field(name="Note", value="One key per user enforced", inline=False)
                     await log_channel.send(embed=embed)
             except Exception as e:
                 log_message(f"Could not send log to channel: {e}")
@@ -441,7 +451,10 @@ class KeyButtons(View):
                 f"`{new_key}`\n\n"
                 f"Use this key in the Gold Menu to activate the software.\n"
                 f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-                f"**Important:** Save this key somewhere safe!",
+                f"**Important:** \n"
+                f"• Save this key somewhere safe!\n"
+                f"• Each user can only have **one active key** at a time\n"
+                f"• If you lose access, contact support",
                 ephemeral=True
             )
 
@@ -461,23 +474,24 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
             
-            for key, info in keys.items():
-                if not isinstance(info, dict):
-                    continue
-                if info.get('user_id') == user_id and info.get('active', False):
-                    # Update rate limiter after successful view
-                    view_key_limiter.allowances[interaction.user.id].append(time.time())
-                    await interaction.response.send_message(
-                        f"🔑 **Your Activation Key:**\n"
-                        f"`{key}`\n\n"
-                        f"Creation date: {info.get('creation_date', 'unknown')}\n\n"
-                        f"Use this key in the Gold Menu to activate the software.",
-                        ephemeral=True
-                    )
-                    return
+            # ENHANCED: Use the improved function to find active key
+            existing_key, key_info = user_has_active_key(user_id, keys)
+            if existing_key:
+                # Update rate limiter after successful view
+                view_key_limiter.allowances[interaction.user.id].append(time.time())
+                await interaction.response.send_message(
+                    f"🔑 **Your Activation Key:**\n"
+                    f"`{existing_key}`\n\n"
+                    f"Creation date: {key_info.get('creation_date', 'unknown')}\n"
+                    f"Status: ✅ Active\n\n"
+                    f"Use this key in the Gold Menu to activate the software.",
+                    ephemeral=True
+                )
+                return
             
             await interaction.response.send_message(
-                "❌ You don't have an active key. Use the 'Get My Key' button to generate one.", 
+                "❌ You don't have an active key. Use the 'Get My Key' button to generate one.\n\n"
+                "**Note:** Each user is limited to one key only.", 
                 ephemeral=True
             )
 
@@ -511,8 +525,12 @@ async def on_ready():
                 content=(
                     "🔑 **Activation Key Manager**\n\n"
                     "Click below to manage your key:\n"
-                    "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
+                    "• **🔄 Get My Key**: Generate a new key (life time[leave the server or lose sub role u lose it])\n"
                     "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
+                    "**Important Rules:**\n"
+                    "• Each user can have only **ONE active key** at a time\n"
+                    "• Keys are tied to your Discord account\n"
+                    "• Keep your key secure!\n\n"
                     "*Your key will be shown directly in this message*"
                 ),
                 view=view
@@ -525,6 +543,10 @@ async def on_ready():
                 "Click below to manage your key:\n"
                 "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
                 "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
+                "**Important Rules:**\n"
+                "• Each user can have only **ONE active key** at a time\n"
+                "• Keys are tied to your Discord account\n"
+                "• Keep your key secure!\n\n"
                 "*Your key will be shown directly in this message*",
                 view=view
             )
