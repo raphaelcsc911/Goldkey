@@ -44,7 +44,7 @@ db_lock = Lock()
 # Create a lock for user-specific operations to prevent race conditions
 user_locks = defaultdict(Lock)
 
-# Rate limiting for button interactions
+# Rate limiting - one click per 6 hours
 class RateLimiter:
     def __init__(self, rate, per):
         self.rate = rate
@@ -60,9 +60,8 @@ class RateLimiter:
             return False
         return True
 
-# Create rate limiters with your requested settings
-get_key_limiter = RateLimiter(1, 21600)  # 1 click per 6 hours (21600 seconds)
-view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
+# Create rate limiter (1 click per 6 hours)
+key_limiter = RateLimiter(1, 21600)  # 1 click per 6 hours (21600 seconds)
 
 # Flask app for keeping the bot alive and handling verification
 app = Flask(__name__)
@@ -159,7 +158,7 @@ def init_db():
         log_message("✅ Database initialized")
 
 def get_user_active_key(user_id):
-    """Get active key for a user - FIXED VERSION"""
+    """Get active key for a user"""
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -395,135 +394,95 @@ class KeyButtons(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🔄 Get My Key", style=discord.ButtonStyle.primary, custom_id="get_key")
-    async def get_key(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="🔑 Get/View My Key", style=discord.ButtonStyle.primary, custom_id="manage_key")
+    async def manage_key(self, interaction: discord.Interaction, button: Button):
         # Use user-specific lock to prevent race conditions
         user_id = str(interaction.user.id)
         with user_locks[user_id]:
-            log_message(f"🔑 Get Key button clicked by user: {user_id} ({interaction.user})")
+            log_message(f"🔑 Manage Key button clicked by user: {user_id} ({interaction.user})")
             
-            # Rate limiting (1 click per 6 hours)
-            if get_key_limiter.is_limited(interaction.user.id):
-                await interaction.response.send_message(
-                    f"❌ You can only request a new key once every 6 hours. Please wait before requesting another key.", 
-                    ephemeral=True
-                )
-                return
-                
+            # Rate limiting (1 click per 6 hours for generation, unlimited for viewing)
+            existing_key = get_user_active_key(user_id)
+            
+            if not existing_key:
+                # User doesn't have a key yet - apply rate limiting
+                if key_limiter.is_limited(interaction.user.id):
+                    await interaction.response.send_message(
+                        f"❌ You can only generate a new key once every 6 hours. Please wait before trying again.", 
+                        ephemeral=True
+                    )
+                    return
+                    
             if not await has_subscriber_role(interaction.user.id, interaction.guild):
                 await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
                 return
 
-            # Check for existing active key using the SAME function as View Key
-            existing_key = get_user_active_key(user_id)
             if existing_key:
-                log_message(f"✅ User already has active key: {existing_key['key']}")
-                await interaction.response.send_message(
-                    f"🔑 You already have an active key: `{existing_key['key']}`\n\n"
-                    f"Use this key in the Gold Menu to activate the software.\n"
-                    f"Creation date: {existing_key.get('creation_date', 'unknown')}\n\n"
-                    f"**Note:** Each user can only have one active key at a time.",
-                    ephemeral=True
-                )
-                return
-
-            log_message(f"🆕 Generating new key for user: {user_id}")
-
-            # Generate new key
-            new_key = generate_key(user_id)
-            log_message(f"🔑 Generated key: {new_key} for user: {user_id}")
-            
-            key_data = {
-                'key': new_key,
-                'user_id': user_id,
-                'username': str(interaction.user),
-                'discriminator': interaction.user.discriminator,
-                'creation_date': str(datetime.now()),
-                'discord_id': user_id,
-                'guild_id': str(interaction.guild.id)
-            }
-
-            # Save to database
-            if create_key(key_data):
-                # Update rate limiter after successful key generation
-                get_key_limiter.allowances[interaction.user.id].append(time.time())
-                
-                # Verify the key was saved correctly
-                verified_key = get_user_active_key(user_id)
-                if verified_key and verified_key['key'] == new_key:
-                    log_message(f"✅ Key creation verified: {new_key}")
-                else:
-                    log_message(f"❌ Key creation verification failed!")
-                
-                # Send log to logging channel
-                try:
-                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                    if log_channel:
-                        embed = discord.Embed(
-                            title="🔑 Key Generated",
-                            description="New key generated for user",
-                            color=0x00ff00,
-                            timestamp=datetime.now()
-                        )
-                        embed.add_field(name="User", value=interaction.user.mention, inline=True)
-                        embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
-                        embed.add_field(name="Note", value="One key per user enforced", inline=False)
-                        await log_channel.send(embed=embed)
-                except Exception as e:
-                    log_message(f"Could not send log to channel: {e}")
-                
-                # Send the key to the user
-                await interaction.response.send_message(
-                    f"🔑 **Your Activation Key:**\n"
-                    f"`{new_key}`\n\n"
-                    f"Use this key in the Gold Menu to activate the software.\n"
-                    f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-                    f"**Important:** Save this key somewhere safe!",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "❌ Error saving your key. Please try again or contact support.",
-                    ephemeral=True
-                )
-
-    @discord.ui.button(label="👀 View My Key", style=discord.ButtonStyle.secondary, custom_id="view_key")
-    async def view_key(self, interaction: discord.Interaction, button: Button):
-        # Use user-specific lock to prevent race conditions
-        user_id = str(interaction.user.id)
-        with user_locks[user_id]:
-            log_message(f"👀 View Key button clicked by user: {user_id} ({interaction.user})")
-            
-            # Rate limiting (2 clicks per hour)
-            if view_key_limiter.is_limited(interaction.user.id):
-                await interaction.response.send_message(
-                    f"❌ You can only view your key twice per hour. Please wait before trying again.", 
-                    ephemeral=True
-                )
-                return
-                
-            # Use the EXACT SAME function as Get Key
-            existing_key = get_user_active_key(user_id)
-            if existing_key:
-                log_message(f"✅ Found active key for viewing: {existing_key['key']}")
-                # Update rate limiter after successful view
-                view_key_limiter.allowances[interaction.user.id].append(time.time())
+                # User already has a key - just show it (no rate limit for viewing)
+                log_message(f"✅ Showing existing key: {existing_key['key']}")
                 await interaction.response.send_message(
                     f"🔑 **Your Activation Key:**\n"
                     f"`{existing_key['key']}`\n\n"
-                    f"Creation date: {existing_key.get('creation_date', 'unknown')}\n"
-                    f"Status: ✅ Active\n\n"
-                    f"Use this key in the Gold Menu to activate the software.",
+                    f"**Creation date:** {existing_key.get('creation_date', 'unknown')}\n"
+                    f"**Status:** ✅ Active\n\n"
+                    f"Use this key in the Gold Menu to activate the software.\n\n"
+                    f"*Note: Each user can only have one active key.*",
                     ephemeral=True
                 )
-                return
-            
-            log_message(f"❌ No active key found for user: {user_id}")
-            await interaction.response.send_message(
-                "❌ You don't have an active key. Use the 'Get My Key' button to generate one.\n\n"
-                "**Note:** Each user is limited to one key only.", 
-                ephemeral=True
-            )
+            else:
+                # User needs a new key - generate one
+                log_message(f"🆕 Generating new key for user: {user_id}")
+                new_key = generate_key(user_id)
+                
+                key_data = {
+                    'key': new_key,
+                    'user_id': user_id,
+                    'username': str(interaction.user),
+                    'discriminator': interaction.user.discriminator,
+                    'creation_date': str(datetime.now()),
+                    'discord_id': user_id,
+                    'guild_id': str(interaction.guild.id)
+                }
+
+                # Save to database
+                if create_key(key_data):
+                    # Update rate limiter after successful key generation
+                    key_limiter.allowances[interaction.user.id].append(time.time())
+                    
+                    # Send log to logging channel
+                    try:
+                        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                        if log_channel:
+                            embed = discord.Embed(
+                                title="🔑 Key Generated",
+                                description="New key generated for user",
+                                color=0x00ff00,
+                                timestamp=datetime.now()
+                            )
+                            embed.add_field(name="User", value=interaction.user.mention, inline=True)
+                            embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
+                            await log_channel.send(embed=embed)
+                    except Exception as e:
+                        log_message(f"Could not send log to channel: {e}")
+                    
+                    # Send the key to the user
+                    await interaction.response.send_message(
+                        f"🔑 **Your New Activation Key:**\n"
+                        f"`{new_key}`\n\n"
+                        f"**Creation date:** {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+                        f"**Status:** ✅ Active\n\n"
+                        f"Use this key in the Gold Menu to activate the software.\n\n"
+                        f"**Important:** \n"
+                        f"• Save this key somewhere safe!\n"
+                        f"• Each user can only have **one active key** at a time\n"
+                        f"• If you lose access, contact support",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ Error saving your key. Please try again or contact support.",
+                        ephemeral=True
+                    )
 
 @bot.event
 async def on_ready():
@@ -555,9 +514,9 @@ async def on_ready():
             await existing_message.edit(
                 content=(
                     "🔑 **Activation Key Manager**\n\n"
-                    "Click below to manage your key:\n"
-                    "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
-                    "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
+                    "Click the button below to:\n"
+                    "• **Get your key** (if you don't have one yet)\n"
+                    "• **View your existing key**\n\n"
                     "**Important Rules:**\n"
                     "• Each user can have only **ONE active key** at a time\n"
                     "• Keys are tied to your Discord account\n"
@@ -571,9 +530,9 @@ async def on_ready():
             # Send a new message
             await channel.send(
                 "🔑 **Activation Key Manager**\n\n"
-                "Click below to manage your key:\n"
-                "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
-                "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
+                "Click the button below to:\n"
+                "• **Get your key** (if you don't have one yet)\n"
+                "• **View your existing key**\n\n"
                 "**Important Rules:**\n"
                 "• Each user can have only **ONE active key** at a time\n"
                 "• Keys are tied to your Discord account\n"
