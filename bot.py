@@ -188,9 +188,10 @@ def safe_save_keys(keys):
         try:
             with open(KEYS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(keys, f, indent=4, ensure_ascii=False)
+            log_message(f"✅ Keys saved successfully. Total keys: {len(keys)}")
             return True
         except Exception as e:
-            log_message(f"Error saving keys: {e}")
+            log_message(f"❌ Error saving keys: {e}")
             return False
 
 def load_keys():
@@ -215,12 +216,40 @@ async def has_subscriber_role(user_id, guild):
 def user_has_active_key(user_id, keys):
     """Check if a user already has an active key (enhanced check)"""
     user_id_str = str(user_id)
+    active_keys = []
+    
     for key, info in keys.items():
         if not isinstance(info, dict):
             continue
         if info.get('user_id') == user_id_str and info.get('active', False):
-            return key, info
+            active_keys.append((key, info))
+    
+    if active_keys:
+        # Return the most recently created key if multiple exist (shouldn't happen, but just in case)
+        active_keys.sort(key=lambda x: x[1].get('creation_date', ''), reverse=True)
+        return active_keys[0]
     return None, None
+
+def deactivate_other_user_keys(user_id, keys, new_key):
+    """Deactivate any other active keys for the same user"""
+    user_id_str = str(user_id)
+    deactivated_count = 0
+    
+    for key, info in keys.items():
+        if key == new_key:  # Skip the new key we're about to create
+            continue
+            
+        if not isinstance(info, dict):
+            continue
+            
+        if info.get('user_id') == user_id_str and info.get('active', False):
+            keys[key]['active'] = False
+            keys[key]['deactivation_date'] = str(datetime.now())
+            keys[key]['deactivation_reason'] = "New key generated - one key per user policy"
+            deactivated_count += 1
+            log_message(f"🔒 Deactivated previous key: {key} for user {user_id_str}")
+    
+    return deactivated_count
 
 @tasks.loop(seconds=14400)  # Runs every 4 hours (changed from 6 hours)
 async def check_subscriber_roles():
@@ -393,7 +422,7 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
 
-            # ENHANCED: Check for existing active key with better logic
+            # Check for existing active key
             existing_key, key_info = user_has_active_key(user_id, keys)
             if existing_key:
                 await interaction.response.send_message(
@@ -407,6 +436,11 @@ class KeyButtons(View):
 
             # Generate new key
             new_key = generate_key(user_id)
+            
+            # CRITICAL FIX: Deactivate any other keys for this user first
+            deactivated_count = deactivate_other_user_keys(user_id, keys, new_key)
+            
+            # Create the new key
             keys[new_key] = {
                 'user_id': user_id,
                 'username': str(interaction.user),
@@ -440,6 +474,8 @@ class KeyButtons(View):
                     )
                     embed.add_field(name="User", value=interaction.user.mention, inline=True)
                     embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
+                    if deactivated_count > 0:
+                        embed.add_field(name="Deactivated Keys", value=str(deactivated_count), inline=True)
                     embed.add_field(name="Note", value="One key per user enforced", inline=False)
                     await log_channel.send(embed=embed)
             except Exception as e:
@@ -474,7 +510,7 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
             
-            # ENHANCED: Use the improved function to find active key
+            # Use the improved function to find active key
             existing_key, key_info = user_has_active_key(user_id, keys)
             if existing_key:
                 # Update rate limiter after successful view
@@ -525,7 +561,7 @@ async def on_ready():
                 content=(
                     "🔑 **Activation Key Manager**\n\n"
                     "Click below to manage your key:\n"
-                    "• **🔄 Get My Key**: Generate a new key (life time[leave the server or lose sub role u lose it])\n"
+                    "• **🔄 Get My Key**: Generate a new key (once every 6 hours)\n"
                     "• **👀 View My Key**: Show your current key (twice per hour)\n\n"
                     "**Important Rules:**\n"
                     "• Each user can have only **ONE active key** at a time\n"
