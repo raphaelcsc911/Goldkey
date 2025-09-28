@@ -4,6 +4,7 @@ import asyncio
 import json
 import hashlib
 import time
+import sqlite3
 from discord.ext import commands, tasks
 from discord.ui import Button, View
 from datetime import datetime, timedelta
@@ -32,14 +33,14 @@ if not BOT_TOKEN:
 ROLE_ID = int(os.getenv('ROLE_ID', 1281782820074688542))
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', 1411206861499400192))
 LOG_CHANNEL_ID = 1411710161868820671
-KEYS_FILE = "activation_keys.json"
+DB_FILE = "keys.db"
 
 # Get port from Render environment variable or use default
 PORT = int(os.environ.get('PORT', 10000))
 print(f"Using port: {PORT}")
 
-# Create a lock for thread-safe file operations
-file_lock = Lock()
+# Create a lock for thread-safe database operations
+db_lock = Lock()
 # Create a lock for user-specific operations to prevent race conditions
 user_locks = defaultdict(Lock)
 
@@ -66,19 +67,6 @@ view_key_limiter = RateLimiter(2, 3600)   # 2 clicks per hour (3600 seconds)
 # Flask app for keeping the bot alive and handling verification
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
-
-# Add default keys to ensure verification works
-DEFAULT_KEYS = {
-    "81667F7D5FE475F0": {
-        "user_id": "884613696658243594",
-        "username": "raphaelcsc911",
-        "discriminator": "0",
-        "creation_date": "2025-08-30 13:37:39.497589",
-        "active": True,
-        "discord_id": "884613696658243594",
-        "guild_id": "1084293448099708968"
-    }
-}
 
 @app.route('/')
 def home():
@@ -113,13 +101,15 @@ def verify_key():
             return jsonify({"valid": False, "error": "No key provided"})
         
         key = data['key'].strip().upper()
-        keys = load_keys()
         
-        log_message(f"Verifying key: {key}")
-        log_message(f"Available keys: {list(keys.keys())}")
+        # Check key in database
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT active FROM activation_keys WHERE key = ?', (key,))
+        result = c.fetchone()
+        conn.close()
         
-        # Check if key exists and is active
-        if key in keys and isinstance(keys[key], dict) and keys[key].get('active', False):
+        if result and result[0] == 1:
             log_message(f"Key found and active: {key}")
             response = jsonify({"valid": True})
             response.headers.add('Access-Control-Allow-Origin', '*')
@@ -145,60 +135,90 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-def safe_load_keys():
-    """Safely load keys with error handling"""
-    with file_lock:
-        try:
-            if not os.path.exists(KEYS_FILE):
-                # If file doesn't exist, create it with default keys
-                with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
-                return DEFAULT_KEYS.copy()
-                
-            with open(KEYS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-            # Ensure all values are dictionaries
-            cleaned_data = {}
-            for key, value in data.items():
-                if isinstance(value, dict):
-                    cleaned_data[key] = value
-                else:
-                    # Convert invalid entries to valid ones
-                    cleaned_data[key] = {
-                        'user_id': str(value) if isinstance(value, int) else "unknown",
-                        'username': "unknown",
-                        'discriminator': "0000",
-                        'creation_date': str(datetime.now()),
-                        'active': False,
-                        'discord_id': "unknown",
-                        'guild_id': "unknown"
-                    }
-                    
-            return cleaned_data
-        except (FileNotFoundError, json.JSONDecodeError):
-            # If file is corrupted, recreate with default keys
-            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(DEFAULT_KEYS, f, indent=4, ensure_ascii=False)
-            return DEFAULT_KEYS.copy()
+# Database initialization
+def init_db():
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS activation_keys (
+                key TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                discriminator TEXT NOT NULL,
+                creation_date TEXT NOT NULL,
+                active INTEGER DEFAULT 1,
+                discord_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                deactivation_date TEXT,
+                deactivation_reason TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        log_message("✅ Database initialized")
 
-def safe_save_keys(keys):
-    """Safely save keys with error handling"""
-    with file_lock:
-        try:
-            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(keys, f, indent=4, ensure_ascii=False)
-            log_message(f"✅ Keys saved successfully. Total keys: {len(keys)}")
-            return True
-        except Exception as e:
-            log_message(f"❌ Error saving keys: {e}")
-            return False
+def get_user_active_key(user_id):
+    """Get active key for a user"""
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''
+            SELECT key, user_id, username, discriminator, creation_date, active, discord_id, guild_id 
+            FROM activation_keys 
+            WHERE user_id = ? AND active = 1
+        ''', (str(user_id),))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                'key': result[0],
+                'user_id': result[1],
+                'username': result[2],
+                'discriminator': result[3],
+                'creation_date': result[4],
+                'active': bool(result[5]),
+                'discord_id': result[6],
+                'guild_id': result[7]
+            }
+        return None
 
-def load_keys():
-    return safe_load_keys()
-
-def save_keys(keys):
-    return safe_save_keys(keys)
+def create_key(key_data):
+    """Create a new key and deactivate any existing ones for the user"""
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # Deactivate any existing active keys for this user
+        c.execute('''
+            UPDATE activation_keys 
+            SET active = 0, 
+                deactivation_date = ?,
+                deactivation_reason = ?
+            WHERE user_id = ? AND active = 1
+        ''', (str(datetime.now()), "Replaced by new key", key_data['user_id']))
+        
+        # Insert new key
+        c.execute('''
+            INSERT INTO activation_keys 
+            (key, user_id, username, discriminator, creation_date, active, discord_id, guild_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            key_data['key'],
+            key_data['user_id'],
+            key_data['username'],
+            key_data['discriminator'],
+            key_data['creation_date'],
+            1,  # active
+            key_data['discord_id'],
+            key_data['guild_id']
+        ))
+        
+        conn.commit()
+        conn.close()
+        log_message(f"✅ Key created for user {key_data['user_id']}: {key_data['key']}")
+        return True
 
 def generate_key(user_id):
     timestamp = str(datetime.now().timestamp())
@@ -213,116 +233,67 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
-def find_user_active_key(user_id, keys):
-    """Find active key for a user - FIXED VERSION"""
-    user_id_str = str(user_id)
-    log_message(f"🔍 Searching for active key for user: {user_id_str}")
-    
-    active_keys = []
-    for key, info in keys.items():
-        if not isinstance(info, dict):
-            continue
-            
-        # Debug logging
-        key_user_id = info.get('user_id', '')
-        key_active = info.get('active', False)
-        log_message(f"  Key: {key}, UserID: {key_user_id}, Active: {key_active}")
-        
-        if key_user_id == user_id_str and key_active:
-            active_keys.append((key, info))
-            log_message(f"  ✅ Found active key: {key}")
-    
-    if active_keys:
-        # Return the most recently created key
-        active_keys.sort(key=lambda x: x[1].get('creation_date', ''), reverse=True)
-        log_message(f"🎯 Returning key: {active_keys[0][0]}")
-        return active_keys[0]
-    
-    log_message("❌ No active key found for user")
-    return None, None
-
-def deactivate_all_user_keys(user_id, keys, keep_key=None):
-    """Deactivate all keys for a user except the one to keep"""
-    user_id_str = str(user_id)
-    deactivated_count = 0
-    
-    for key, info in keys.items():
-        if not isinstance(info, dict):
-            continue
-            
-        if info.get('user_id') == user_id_str and info.get('active', False):
-            if keep_key and key == keep_key:
-                continue  # Skip the key we want to keep
-                
-            keys[key]['active'] = False
-            keys[key]['deactivation_date'] = str(datetime.now())
-            keys[key]['deactivation_reason'] = "Replaced by new key - one key per user policy"
-            deactivated_count += 1
-            log_message(f"🔒 Deactivated key: {key} for user {user_id_str}")
-    
-    return deactivated_count
-
-@tasks.loop(seconds=14400)  # Runs every 4 hours (changed from 6 hours)
+@tasks.loop(seconds=14400)  # Runs every 4 hours
 async def check_subscriber_roles():
     """Check if users still have the subscriber role and deactivate keys if not"""
     log_message("🔍 Checking subscriber roles...")
-    keys = load_keys()
+    
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT key, user_id, guild_id FROM activation_keys WHERE active = 1')
+        active_keys = c.fetchall()
+        conn.close()
+    
     deactivated_count = 0
     
-    for key, info in list(keys.items()):
-        if not isinstance(info, dict):
-            continue
-            
-        if 'active' not in info or 'user_id' not in info:
-            continue
-            
-        if info['active']:
-            try:
-                user_id = int(info['user_id'])
-                guild_id = info.get('guild_id')
+    for key, user_id, guild_id in active_keys:
+        try:
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                continue
                 
-                if not guild_id:
-                    continue
+            has_role = await has_subscriber_role(int(user_id), guild)
+            if not has_role:
+                # Deactivate the key
+                with db_lock:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('''
+                        UPDATE activation_keys 
+                        SET active = 0, 
+                            deactivation_date = ?,
+                            deactivation_reason = ?
+                        WHERE key = ?
+                    ''', (str(datetime.now()), "Lost subscriber role", key))
+                    conn.commit()
+                    conn.close()
+                
+                deactivated_count += 1
+                log_message(f"❌ Deactivated key for user {user_id}")
+                
+                # Send log to logging channel
+                try:
+                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                    if log_channel:
+                        embed = discord.Embed(
+                            title="🔑 Key Deactivated",
+                            description="User lost subscriber role",
+                            color=0xff0000,
+                            timestamp=datetime.now()
+                        )
+                        embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
+                        embed.add_field(name="Key", value=f"`{key}`", inline=True)
+                        embed.add_field(name="Reason", value="Lost subscriber role", inline=False)
+                        embed.set_footer(text="Automatic deactivation")
+                        await log_channel.send(embed=embed)
+                except Exception as e:
+                    log_message(f"Could not send log to channel: {e}")
                     
-                guild = bot.get_guild(int(guild_id))
-                if not guild:
-                    continue
-                    
-                has_role = await has_subscriber_role(user_id, guild)
-                if not has_role:
-                    # Deactivate the key
-                    keys[key]['active'] = False
-                    keys[key]['deactivation_date'] = str(datetime.now())
-                    keys[key]['deactivation_reason'] = "Lost subscriber role"
-                    deactivated_count += 1
-                    log_message(f"❌ Deactivated key for user {info.get('username', 'unknown')}")
-                    
-                    # Send log to logging channel
-                    try:
-                        log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                        if log_channel:
-                            embed = discord.Embed(
-                                title="🔑 Key Deactivated",
-                                description="User lost subscriber role",
-                                color=0xff0000,
-                                timestamp=datetime.now()
-                            )
-                            embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
-                            embed.add_field(name="Key", value=f"`{key}`", inline=True)
-                            embed.add_field(name="Reason", value="Lost subscriber role", inline=False)
-                            embed.set_footer(text="Automatic deactivation")
-                            await log_channel.send(embed=embed)
-                    except Exception as e:
-                        log_message(f"Could not send log to channel: {e}")
-            except (ValueError, TypeError) as e:
-                # Invalid user_id format
-                keys[key]['active'] = False
-                keys[key]['deactivation_date'] = str(datetime.now())
-                keys[key]['deactivation_reason'] = f"Invalid user ID format: {e}"
-                log_message(f"❌ Deactivated key due to invalid user ID: {key}")
+        except Exception as e:
+            log_message(f"Error checking role for user {user_id}: {e}")
     
     if deactivated_count > 0:
-        save_keys(keys)
         log_message(f"✅ Deactivated {deactivated_count} keys due to lost subscriber roles")
     else:
         log_message("✅ All keys are valid")
@@ -332,44 +303,45 @@ async def on_member_remove(member):
     """Automatically deactivate keys when a member leaves the server"""
     try:
         user_id = str(member.id)
-        keys = load_keys()
-        deactivated_count = 0
         
-        log_message(f"Member left: {member.name} (ID: {user_id})")
-        
-        for key, info in keys.items():
-            if not isinstance(info, dict):
-                continue
-                
-            if info.get('user_id') == user_id and info.get('active', False):
-                info['active'] = False
-                info['deactivation_date'] = str(datetime.now())
-                info['deactivation_reason'] = "User left the server"
-                deactivated_count += 1
-                log_message(f"Deactivated key: {key} for user {member.name}")
-        
-        if deactivated_count > 0:
-            save_keys(keys)
-            log_message(f"Deactivated {deactivated_count} keys for user {member.name} (ID: {user_id}) who left the server")
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT COUNT(*) FROM activation_keys WHERE user_id = ? AND active = 1', (user_id,))
+            active_count = c.fetchone()[0]
             
-            # Send log to logging channel
-            try:
-                log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                if log_channel:
-                    embed = discord.Embed(
-                        title="🔑 Key Deactivated",
-                        description="User left the server",
-                        color=0xff0000,
-                        timestamp=datetime.now()
-                    )
-                    embed.add_field(name="User", value=f"{member.name}#{member.discriminator}", inline=True)
-                    embed.add_field(name="Keys Deactivated", value=str(deactivated_count), inline=True)
-                    embed.add_field(name="Reason", value="User left the server", inline=False)
-                    await log_channel.send(embed=embed)
-            except Exception as e:
-                log_message(f"Could not send log to channel: {e}")
-        else:
-            log_message(f"User {member.name} (ID: {user_id}) left but had no active keys")
+            if active_count > 0:
+                c.execute('''
+                    UPDATE activation_keys 
+                    SET active = 0, 
+                        deactivation_date = ?,
+                        deactivation_reason = ?
+                    WHERE user_id = ? AND active = 1
+                ''', (str(datetime.now()), "User left the server", user_id))
+                conn.commit()
+                
+                log_message(f"Deactivated {active_count} keys for user {member.name} (ID: {user_id}) who left the server")
+                
+                # Send log to logging channel
+                try:
+                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                    if log_channel:
+                        embed = discord.Embed(
+                            title="🔑 Key Deactivated",
+                            description="User left the server",
+                            color=0xff0000,
+                            timestamp=datetime.now()
+                        )
+                        embed.add_field(name="User", value=f"{member.name}#{member.discriminator}", inline=True)
+                        embed.add_field(name="Keys Deactivated", value=str(active_count), inline=True)
+                        embed.add_field(name="Reason", value="User left the server", inline=False)
+                        await log_channel.send(embed=embed)
+                except Exception as e:
+                    log_message(f"Could not send log to channel: {e}")
+            else:
+                log_message(f"User {member.name} (ID: {user_id}) left but had no active keys")
+                
+            conn.close()
             
     except Exception as e:
         log_message(f"Error handling member leave: {e}")
@@ -379,22 +351,21 @@ async def on_member_remove(member):
 @commands.has_permissions(administrator=True)
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def key_status(ctx):
-    keys = load_keys()
-    active = 0
-    inactive = 0
-    
-    for key, info in keys.items():
-        if not isinstance(info, dict):
-            continue
-        if info.get('active', False):
-            active += 1
-        else:
-            inactive += 1
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM activation_keys WHERE active = 1')
+        active = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM activation_keys WHERE active = 0')
+        inactive = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM activation_keys')
+        total = c.fetchone()[0]
+        conn.close()
     
     embed = discord.Embed(title="🔑 Key Status", color=0x00ff00)
     embed.add_field(name="Active Keys", value=str(active), inline=True)
     embed.add_field(name="Inactive Keys", value=str(inactive), inline=True)
-    embed.add_field(name="Total Keys", value=str(len(keys)), inline=True)
+    embed.add_field(name="Total Keys", value=str(total), inline=True)
     
     await ctx.send(embed=embed)
 
@@ -430,97 +401,66 @@ class KeyButtons(View):
                 await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
                 return
 
-            keys = load_keys()
-            user_id = str(interaction.user.id)
-
-            log_message(f"🚀 Get Key button clicked by user: {user_id} ({interaction.user})")
-
-            # Check for existing active key using FIXED function
-            existing_key, key_info = find_user_active_key(user_id, keys)
+            # Check for existing active key
+            existing_key = get_user_active_key(user_id)
             if existing_key:
-                log_message(f"✅ User already has active key: {existing_key}")
                 await interaction.response.send_message(
-                    f"🔑 You already have an active key: `{existing_key}`\n\n"
+                    f"🔑 You already have an active key: `{existing_key['key']}`\n\n"
                     f"Use this key in the Gold Menu to activate the software.\n"
-                    f"Creation date: {key_info.get('creation_date', 'unknown')}\n\n"
+                    f"Creation date: {existing_key.get('creation_date', 'unknown')}\n\n"
                     f"**Note:** Each user can only have one active key at a time.",
                     ephemeral=True
                 )
                 return
 
-            log_message(f"🆕 Generating new key for user: {user_id}")
-
             # Generate new key
             new_key = generate_key(user_id)
-            log_message(f"🔑 Generated key: {new_key} for user: {user_id}")
-            
-            # DEACTIVATE ANY EXISTING KEYS FIRST
-            deactivated_count = deactivate_all_user_keys(user_id, keys)
-            if deactivated_count > 0:
-                log_message(f"🔒 Deactivated {deactivated_count} existing keys for user {user_id}")
-            
-            # Create the new key
-            keys[new_key] = {
-                'user_id': user_id,  # Consistent user ID storage
+            key_data = {
+                'key': new_key,
+                'user_id': user_id,
                 'username': str(interaction.user),
                 'discriminator': interaction.user.discriminator,
                 'creation_date': str(datetime.now()),
-                'active': True,
-                'discord_id': user_id,  # Same as user_id for consistency
+                'discord_id': user_id,
                 'guild_id': str(interaction.guild.id)
             }
 
-            log_message(f"💾 Saving keys for user: {user_id}")
-            # Save keys and handle potential errors
-            if not save_keys(keys):
-                log_message(f"❌ Failed to save keys for user: {user_id}")
+            # Save to database
+            if create_key(key_data):
+                # Update rate limiter after successful key generation
+                get_key_limiter.allowances[interaction.user.id].append(time.time())
+                
+                # Send log to logging channel
+                try:
+                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                    if log_channel:
+                        embed = discord.Embed(
+                            title="🔑 Key Generated",
+                            description="New key generated for user",
+                            color=0x00ff00,
+                            timestamp=datetime.now()
+                        )
+                        embed.add_field(name="User", value=interaction.user.mention, inline=True)
+                        embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
+                        embed.add_field(name="Note", value="One key per user enforced", inline=False)
+                        await log_channel.send(embed=embed)
+                except Exception as e:
+                    log_message(f"Could not send log to channel: {e}")
+                
+                # Send the key to the user
+                await interaction.response.send_message(
+                    f"🔑 **Your Activation Key:**\n"
+                    f"`{new_key}`\n\n"
+                    f"Use this key in the Gold Menu to activate the software.\n"
+                    f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+                    f"**Important:** Save this key somewhere safe!",
+                    ephemeral=True
+                )
+            else:
                 await interaction.response.send_message(
                     "❌ Error saving your key. Please try again or contact support.",
                     ephemeral=True
                 )
-                return
-            
-            # Verify the key was saved correctly
-            saved_keys = load_keys()
-            if new_key in saved_keys and saved_keys[new_key].get('active', False):
-                log_message(f"✅ Key saved and verified: {new_key}")
-            else:
-                log_message(f"❌ Key save verification failed: {new_key}")
-            
-            # Update rate limiter after successful key generation
-            get_key_limiter.allowances[interaction.user.id].append(time.time())
-            
-            # Send log to logging channel
-            try:
-                log_channel = bot.get_channel(LOG_CHANNEL_ID)
-                if log_channel:
-                    embed = discord.Embed(
-                        title="🔑 Key Generated",
-                        description="New key generated for user",
-                        color=0x00ff00,
-                        timestamp=datetime.now()
-                    )
-                    embed.add_field(name="User", value=interaction.user.mention, inline=True)
-                    embed.add_field(name="Key", value=f"`{new_key}`", inline=True)
-                    if deactivated_count > 0:
-                        embed.add_field(name="Deactivated Keys", value=str(deactivated_count), inline=True)
-                    embed.add_field(name="Note", value="One key per user enforced", inline=False)
-                    await log_channel.send(embed=embed)
-            except Exception as e:
-                log_message(f"Could not send log to channel: {e}")
-            
-            # Send the key directly in the ephemeral response
-            await interaction.response.send_message(
-                f"🔑 **Your Activation Key:**\n"
-                f"`{new_key}`\n\n"
-                f"Use this key in the Gold Menu to activate the software.\n"
-                f"Creation date: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-                f"**Important:** \n"
-                f"• Save this key somewhere safe!\n"
-                f"• Each user can only have **one active key** at a time\n"
-                f"• If you lose access, contact support",
-                ephemeral=True
-            )
 
     @discord.ui.button(label="👀 View My Key", style=discord.ButtonStyle.secondary, custom_id="view_key")
     async def view_key(self, interaction: discord.Interaction, button: Button):
@@ -535,28 +475,20 @@ class KeyButtons(View):
                 )
                 return
                 
-            keys = load_keys()
-            user_id = str(interaction.user.id)
-            
-            log_message(f"👀 View Key button clicked by user: {user_id} ({interaction.user})")
-            
-            # Use the FIXED function to find active key
-            existing_key, key_info = find_user_active_key(user_id, keys)
+            existing_key = get_user_active_key(user_id)
             if existing_key:
-                log_message(f"✅ Found active key for viewing: {existing_key}")
                 # Update rate limiter after successful view
                 view_key_limiter.allowances[interaction.user.id].append(time.time())
                 await interaction.response.send_message(
                     f"🔑 **Your Activation Key:**\n"
-                    f"`{existing_key}`\n\n"
-                    f"Creation date: {key_info.get('creation_date', 'unknown')}\n"
+                    f"`{existing_key['key']}`\n\n"
+                    f"Creation date: {existing_key.get('creation_date', 'unknown')}\n"
                     f"Status: ✅ Active\n\n"
                     f"Use this key in the Gold Menu to activate the software.",
                     ephemeral=True
                 )
                 return
             
-            log_message(f"❌ No active key found for user: {user_id}")
             await interaction.response.send_message(
                 "❌ You don't have an active key. Use the 'Get My Key' button to generate one.\n\n"
                 "**Note:** Each user is limited to one key only.", 
@@ -566,6 +498,7 @@ class KeyButtons(View):
 @bot.event
 async def on_ready():
     print(f'✅ Bot {bot.user} is online!')
+    init_db()  # Initialize database
     bot.add_view(KeyButtons())
     check_subscriber_roles.start()
     
