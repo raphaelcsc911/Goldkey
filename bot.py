@@ -213,41 +213,52 @@ async def has_subscriber_role(user_id, guild):
     except:
         return False
 
-def user_has_active_key(user_id, keys):
-    """Check if a user already has an active key (enhanced check)"""
+def find_user_active_key(user_id, keys):
+    """Find active key for a user - FIXED VERSION"""
     user_id_str = str(user_id)
-    active_keys = []
+    log_message(f"🔍 Searching for active key for user: {user_id_str}")
     
+    active_keys = []
     for key, info in keys.items():
         if not isinstance(info, dict):
             continue
-        if info.get('user_id') == user_id_str and info.get('active', False):
+            
+        # Debug logging
+        key_user_id = info.get('user_id', '')
+        key_active = info.get('active', False)
+        log_message(f"  Key: {key}, UserID: {key_user_id}, Active: {key_active}")
+        
+        if key_user_id == user_id_str and key_active:
             active_keys.append((key, info))
+            log_message(f"  ✅ Found active key: {key}")
     
     if active_keys:
-        # Return the most recently created key if multiple exist (shouldn't happen, but just in case)
+        # Return the most recently created key
         active_keys.sort(key=lambda x: x[1].get('creation_date', ''), reverse=True)
+        log_message(f"🎯 Returning key: {active_keys[0][0]}")
         return active_keys[0]
+    
+    log_message("❌ No active key found for user")
     return None, None
 
-def deactivate_other_user_keys(user_id, keys, new_key):
-    """Deactivate any other active keys for the same user"""
+def deactivate_all_user_keys(user_id, keys, keep_key=None):
+    """Deactivate all keys for a user except the one to keep"""
     user_id_str = str(user_id)
     deactivated_count = 0
     
     for key, info in keys.items():
-        if key == new_key:  # Skip the new key we're about to create
-            continue
-            
         if not isinstance(info, dict):
             continue
             
         if info.get('user_id') == user_id_str and info.get('active', False):
+            if keep_key and key == keep_key:
+                continue  # Skip the key we want to keep
+                
             keys[key]['active'] = False
             keys[key]['deactivation_date'] = str(datetime.now())
-            keys[key]['deactivation_reason'] = "New key generated - one key per user policy"
+            keys[key]['deactivation_reason'] = "Replaced by new key - one key per user policy"
             deactivated_count += 1
-            log_message(f"🔒 Deactivated previous key: {key} for user {user_id_str}")
+            log_message(f"🔒 Deactivated key: {key} for user {user_id_str}")
     
     return deactivated_count
 
@@ -422,9 +433,12 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
 
-            # Check for existing active key
-            existing_key, key_info = user_has_active_key(user_id, keys)
+            log_message(f"🚀 Get Key button clicked by user: {user_id} ({interaction.user})")
+
+            # Check for existing active key using FIXED function
+            existing_key, key_info = find_user_active_key(user_id, keys)
             if existing_key:
+                log_message(f"✅ User already has active key: {existing_key}")
                 await interaction.response.send_message(
                     f"🔑 You already have an active key: `{existing_key}`\n\n"
                     f"Use this key in the Gold Menu to activate the software.\n"
@@ -434,30 +448,44 @@ class KeyButtons(View):
                 )
                 return
 
+            log_message(f"🆕 Generating new key for user: {user_id}")
+
             # Generate new key
             new_key = generate_key(user_id)
+            log_message(f"🔑 Generated key: {new_key} for user: {user_id}")
             
-            # CRITICAL FIX: Deactivate any other keys for this user first
-            deactivated_count = deactivate_other_user_keys(user_id, keys, new_key)
+            # DEACTIVATE ANY EXISTING KEYS FIRST
+            deactivated_count = deactivate_all_user_keys(user_id, keys)
+            if deactivated_count > 0:
+                log_message(f"🔒 Deactivated {deactivated_count} existing keys for user {user_id}")
             
             # Create the new key
             keys[new_key] = {
-                'user_id': user_id,
+                'user_id': user_id,  # Consistent user ID storage
                 'username': str(interaction.user),
                 'discriminator': interaction.user.discriminator,
                 'creation_date': str(datetime.now()),
                 'active': True,
-                'discord_id': str(interaction.user.id),
+                'discord_id': user_id,  # Same as user_id for consistency
                 'guild_id': str(interaction.guild.id)
             }
 
+            log_message(f"💾 Saving keys for user: {user_id}")
             # Save keys and handle potential errors
             if not save_keys(keys):
+                log_message(f"❌ Failed to save keys for user: {user_id}")
                 await interaction.response.send_message(
                     "❌ Error saving your key. Please try again or contact support.",
                     ephemeral=True
                 )
                 return
+            
+            # Verify the key was saved correctly
+            saved_keys = load_keys()
+            if new_key in saved_keys and saved_keys[new_key].get('active', False):
+                log_message(f"✅ Key saved and verified: {new_key}")
+            else:
+                log_message(f"❌ Key save verification failed: {new_key}")
             
             # Update rate limiter after successful key generation
             get_key_limiter.allowances[interaction.user.id].append(time.time())
@@ -510,9 +538,12 @@ class KeyButtons(View):
             keys = load_keys()
             user_id = str(interaction.user.id)
             
-            # Use the improved function to find active key
-            existing_key, key_info = user_has_active_key(user_id, keys)
+            log_message(f"👀 View Key button clicked by user: {user_id} ({interaction.user})")
+            
+            # Use the FIXED function to find active key
+            existing_key, key_info = find_user_active_key(user_id, keys)
             if existing_key:
+                log_message(f"✅ Found active key for viewing: {existing_key}")
                 # Update rate limiter after successful view
                 view_key_limiter.allowances[interaction.user.id].append(time.time())
                 await interaction.response.send_message(
@@ -525,6 +556,7 @@ class KeyButtons(View):
                 )
                 return
             
+            log_message(f"❌ No active key found for user: {user_id}")
             await interaction.response.send_message(
                 "❌ You don't have an active key. Use the 'Get My Key' button to generate one.\n\n"
                 "**Note:** Each user is limited to one key only.", 
