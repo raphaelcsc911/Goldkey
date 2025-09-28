@@ -159,7 +159,7 @@ def init_db():
         log_message("✅ Database initialized")
 
 def get_user_active_key(user_id):
-    """Get active key for a user"""
+    """Get active key for a user - FIXED VERSION"""
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -167,11 +167,14 @@ def get_user_active_key(user_id):
             SELECT key, user_id, username, discriminator, creation_date, active, discord_id, guild_id 
             FROM activation_keys 
             WHERE user_id = ? AND active = 1
+            ORDER BY creation_date DESC
+            LIMIT 1
         ''', (str(user_id),))
         result = c.fetchone()
         conn.close()
         
         if result:
+            log_message(f"✅ Found active key for user {user_id}: {result[0]}")
             return {
                 'key': result[0],
                 'user_id': result[1],
@@ -182,7 +185,9 @@ def get_user_active_key(user_id):
                 'discord_id': result[6],
                 'guild_id': result[7]
             }
-        return None
+        else:
+            log_message(f"❌ No active key found for user {user_id}")
+            return None
 
 def create_key(key_data):
     """Create a new key and deactivate any existing ones for the user"""
@@ -190,14 +195,20 @@ def create_key(key_data):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        # Deactivate any existing active keys for this user
-        c.execute('''
-            UPDATE activation_keys 
-            SET active = 0, 
-                deactivation_date = ?,
-                deactivation_reason = ?
-            WHERE user_id = ? AND active = 1
-        ''', (str(datetime.now()), "Replaced by new key", key_data['user_id']))
+        # First check if user already has an active key
+        c.execute('SELECT key FROM activation_keys WHERE user_id = ? AND active = 1', (key_data['user_id'],))
+        existing_key = c.fetchone()
+        
+        if existing_key:
+            log_message(f"🔒 Deactivating existing key: {existing_key[0]}")
+            # Deactivate any existing active keys for this user
+            c.execute('''
+                UPDATE activation_keys 
+                SET active = 0, 
+                    deactivation_date = ?,
+                    deactivation_reason = ?
+                WHERE user_id = ? AND active = 1
+            ''', (str(datetime.now()), "Replaced by new key", key_data['user_id']))
         
         # Insert new key
         c.execute('''
@@ -389,6 +400,8 @@ class KeyButtons(View):
         # Use user-specific lock to prevent race conditions
         user_id = str(interaction.user.id)
         with user_locks[user_id]:
+            log_message(f"🔑 Get Key button clicked by user: {user_id} ({interaction.user})")
+            
             # Rate limiting (1 click per 6 hours)
             if get_key_limiter.is_limited(interaction.user.id):
                 await interaction.response.send_message(
@@ -401,9 +414,10 @@ class KeyButtons(View):
                 await interaction.response.send_message("❌ You need the 'subscriber' role!", ephemeral=True)
                 return
 
-            # Check for existing active key
+            # Check for existing active key using the SAME function as View Key
             existing_key = get_user_active_key(user_id)
             if existing_key:
+                log_message(f"✅ User already has active key: {existing_key['key']}")
                 await interaction.response.send_message(
                     f"🔑 You already have an active key: `{existing_key['key']}`\n\n"
                     f"Use this key in the Gold Menu to activate the software.\n"
@@ -413,8 +427,12 @@ class KeyButtons(View):
                 )
                 return
 
+            log_message(f"🆕 Generating new key for user: {user_id}")
+
             # Generate new key
             new_key = generate_key(user_id)
+            log_message(f"🔑 Generated key: {new_key} for user: {user_id}")
+            
             key_data = {
                 'key': new_key,
                 'user_id': user_id,
@@ -429,6 +447,13 @@ class KeyButtons(View):
             if create_key(key_data):
                 # Update rate limiter after successful key generation
                 get_key_limiter.allowances[interaction.user.id].append(time.time())
+                
+                # Verify the key was saved correctly
+                verified_key = get_user_active_key(user_id)
+                if verified_key and verified_key['key'] == new_key:
+                    log_message(f"✅ Key creation verified: {new_key}")
+                else:
+                    log_message(f"❌ Key creation verification failed!")
                 
                 # Send log to logging channel
                 try:
@@ -467,6 +492,8 @@ class KeyButtons(View):
         # Use user-specific lock to prevent race conditions
         user_id = str(interaction.user.id)
         with user_locks[user_id]:
+            log_message(f"👀 View Key button clicked by user: {user_id} ({interaction.user})")
+            
             # Rate limiting (2 clicks per hour)
             if view_key_limiter.is_limited(interaction.user.id):
                 await interaction.response.send_message(
@@ -475,8 +502,10 @@ class KeyButtons(View):
                 )
                 return
                 
+            # Use the EXACT SAME function as Get Key
             existing_key = get_user_active_key(user_id)
             if existing_key:
+                log_message(f"✅ Found active key for viewing: {existing_key['key']}")
                 # Update rate limiter after successful view
                 view_key_limiter.allowances[interaction.user.id].append(time.time())
                 await interaction.response.send_message(
@@ -489,6 +518,7 @@ class KeyButtons(View):
                 )
                 return
             
+            log_message(f"❌ No active key found for user: {user_id}")
             await interaction.response.send_message(
                 "❌ You don't have an active key. Use the 'Get My Key' button to generate one.\n\n"
                 "**Note:** Each user is limited to one key only.", 
